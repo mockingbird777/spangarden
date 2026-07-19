@@ -1,0 +1,3 @@
+{"trace_id":"jsonl-example","id":"root","name":"agent.run","start_time":"2026-07-19T00:00:00.000Z","duration_ms":900,"type":"agent"}
+{"trace_id":"jsonl-example","id":"model","parent_id":"root","name":"chat","start_time":"2026-07-19T00:00:00.100Z","duration_ms":620,"model":"orchid-2-mini","input_tokens":800,"output_tokens":210,"status":"ok"}
+{"trace_id":"jsonl-example","id":"tool","parent_id":"root","name":"database lookup","start_time":"2026-07-19T00:00:00.730Z","duration_ms":120,"tool_name":"catalog.search","status":"ok"}

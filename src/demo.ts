@@ -1,0 +1,104 @@
+export const demoTrace: unknown = {
+  resourceSpans: [
+    {
+      resource: {
+        attributes: [
+          { key: "service.name", value: { stringValue: "travel-concierge" } },
+          { key: "deployment.environment", value: { stringValue: "local-demo" } }
+        ]
+      },
+      scopeSpans: [
+        {
+          scope: { name: "example.agent.telemetry" },
+          spans: [
+            {
+              traceId: "garden-demo-01",
+              spanId: "root",
+              name: "agent.plan_trip",
+              startTimeUnixNano: "1784419200000000000",
+              endTimeUnixNano: "1784419202850000000",
+              attributes: [
+                { key: "gen_ai.operation.name", value: { stringValue: "agent" } },
+                { key: "session.id", value: { stringValue: "traveler-8492" } },
+                { key: "prompt.preview", value: { stringValue: "Plan a calm three-day trip near the sea" } }
+              ],
+              status: { code: "OK" }
+            },
+            {
+              traceId: "garden-demo-01",
+              spanId: "plan",
+              parentSpanId: "root",
+              name: "chat itinerary planner",
+              startTimeUnixNano: "1784419200060000000",
+              endTimeUnixNano: "1784419200740000000",
+              attributes: [
+                { key: "gen_ai.operation.name", value: { stringValue: "chat" } },
+                { key: "gen_ai.request.model", value: { stringValue: "orchid-2-mini" } },
+                { key: "gen_ai.usage.input_tokens", value: { intValue: 1280 } },
+                { key: "gen_ai.usage.output_tokens", value: { intValue: 436 } },
+                { key: "authorization", value: { stringValue: "Bearer demo-token-should-disappear" } }
+              ],
+              status: { code: "OK" }
+            },
+            {
+              traceId: "garden-demo-01",
+              spanId: "weather-1",
+              parentSpanId: "root",
+              name: "tool.weather",
+              startTimeUnixNano: "1784419200760000000",
+              endTimeUnixNano: "1784419200950000000",
+              attributes: [
+                { key: "gen_ai.operation.name", value: { stringValue: "execute_tool" } },
+                { key: "gen_ai.tool.name", value: { stringValue: "weather" } },
+                { key: "error.type", value: { stringValue: "rate_limit" } }
+              ],
+              status: { code: "ERROR" }
+            },
+            {
+              traceId: "garden-demo-01",
+              spanId: "weather-2",
+              parentSpanId: "root",
+              name: "tool.weather",
+              startTimeUnixNano: "1784419201020000000",
+              endTimeUnixNano: "1784419201270000000",
+              attributes: [
+                { key: "gen_ai.operation.name", value: { stringValue: "execute_tool" } },
+                { key: "gen_ai.tool.name", value: { stringValue: "weather" } },
+                { key: "error.type", value: { stringValue: "timeout" } }
+              ],
+              status: { code: "ERROR" }
+            },
+            {
+              traceId: "garden-demo-01",
+              spanId: "weather-3",
+              parentSpanId: "root",
+              name: "tool.weather",
+              startTimeUnixNano: "1784419201350000000",
+              endTimeUnixNano: "1784419201630000000",
+              attributes: [
+                { key: "gen_ai.operation.name", value: { stringValue: "execute_tool" } },
+                { key: "gen_ai.tool.name", value: { stringValue: "weather" } }
+              ],
+              status: { code: "OK" }
+            },
+            {
+              traceId: "garden-demo-01",
+              spanId: "finish",
+              parentSpanId: "root",
+              name: "chat final answer",
+              startTimeUnixNano: "1784419201710000000",
+              endTimeUnixNano: "1784419202790000000",
+              attributes: [
+                { key: "gen_ai.operation.name", value: { stringValue: "chat" } },
+                { key: "gen_ai.response.model", value: { stringValue: "orchid-2" } },
+                { key: "gen_ai.usage.input_tokens", value: { intValue: 2140 } },
+                { key: "gen_ai.usage.output_tokens", value: { intValue: 760 } }
+              ],
+              status: { code: "OK" }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+};

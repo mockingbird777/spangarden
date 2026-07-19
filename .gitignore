@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+.DS_Store
+*.tmp
+spangarden-report.*
+!examples/*.json
+!examples/*.jsonl
+!examples/*.json.gz

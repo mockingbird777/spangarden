@@ -1,0 +1,47 @@
+{
+  "name": "spangarden",
+  "version": "0.1.0",
+  "description": "Local-first AI agent trace analysis from the terminal.",
+  "type": "module",
+  "bin": {
+    "spangarden": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "docs": "npm run build && node scripts/generate-docs.mjs",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "ai-agents",
+    "observability",
+    "opentelemetry",
+    "llm",
+    "tracing",
+    "cli",
+    "local-first"
+  ],
+  "author": "mockingbird777",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mockingbird777/spangarden.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mockingbird777/spangarden/issues"
+  },
+  "homepage": "https://mockingbird777.github.io/spangarden/",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

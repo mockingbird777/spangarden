@@ -1,0 +1,13 @@
+{
+  "currency": "USD",
+  "models": {
+    "orchid-2-mini": {
+      "inputPerMillion": 0.4,
+      "outputPerMillion": 1.6
+    },
+    "orchid-2": {
+      "inputPerMillion": 2,
+      "outputPerMillion": 8
+    }
+  }
+}
