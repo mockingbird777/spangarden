@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { adaptSpans } from "../src/adapter.js";
 import { analyzeSpans } from "../src/analyze.js";
 import { span } from "./helpers.js";
 
@@ -88,4 +89,65 @@ test("warns about missing parent and timing data", () => {
   const report = analyzeSpans([span("orphan", { parentId: "gone", startMs: 0, endMs: 0, durationMs: 0 })]);
   assert.equal(report.traces[0]?.rootIds[0], "orphan");
   assert.equal(report.warnings.length, 2);
+});
+
+test("scopes missing-parent checks to a trace", () => {
+  const report = analyzeSpans([
+    span("parent", { traceId: "trace-a" }),
+    span("child", { traceId: "trace-b", parentId: "parent" }),
+  ]);
+  assert.ok(report.warnings.some((warning) => warning.includes("missing parent")));
+  assert.deepEqual(report.traces.find((trace) => trace.id === "trace-b")?.rootIds, ["child"]);
+});
+
+test("analyzes a deep parent chain without recursive stack growth", () => {
+  const spans = Array.from({ length: 12_000 }, (_, index) => span(`span-${index}`, {
+    name: `operation-${index}`,
+    ...(index === 0 ? {} : { parentId: `span-${index - 1}` }),
+    startMs: index,
+    endMs: index + 1,
+    durationMs: 1,
+  }));
+  const report = analyzeSpans(spans);
+  assert.equal(report.traces[0]?.criticalPath.length, 12_000);
+  assert.equal(report.traces[0]?.criticalPathMs, 12_000);
+});
+
+test("bounds loop evidence for hostile repeated input", () => {
+  const spans = [span("root"), ...Array.from({ length: 150 }, (_, index) => span(`call-${index}`, {
+    parentId: "root", kind: "tool", tool: "repeat", startMs: index,
+  }))];
+  const report = analyzeSpans(spans);
+  assert.equal(report.loops[0]?.spanIds.length, 100);
+  assert.ok(report.warnings.some((warning) => warning.includes("Loop evidence")));
+});
+
+test("redacts report-wide identifiers and aggregate labels while preserving relationships", () => {
+  const secretId = "alice@example.test";
+  const report = analyzeSpans([
+    span(secretId, { traceId: secretId, kind: "model", model: "sk-abcdefghijklmnop" }),
+    span("child", { traceId: secretId, parentId: secretId }),
+  ], { title: "Bearer abcdefghijklmnop", source: "alice@example.test.json" });
+  assert.ok(!JSON.stringify(report).includes("alice@example.test"));
+  assert.ok(!JSON.stringify(report).includes("abcdefghijklmnop"));
+  assert.equal(report.spans[1]?.parentId, report.spans[0]?.id);
+  assert.equal(report.traces[0]?.id, report.spans[0]?.traceId);
+  assert.equal(report.usage[0]?.name, "[REDACTED]");
+});
+
+test("groups generic session IDs but aliases them whenever default redaction is enabled", () => {
+  const adapted = adaptSpans({ spans: [
+    { id: "one", session_id: "opaque-customer-session", name: "one" },
+    { id: "two", session_id: "opaque-customer-session", name: "two" },
+  ] });
+  assert.equal(adapted[0]?.traceId, "opaque-customer-session");
+  const safe = analyzeSpans(adapted);
+  assert.notEqual(safe.traces[0]?.id, "opaque-customer-session");
+  assert.equal(safe.spans[0]?.traceId, safe.traces[0]?.id);
+  assert.equal(analyzeSpans(adapted, { redact: false }).traces[0]?.id, "opaque-customer-session");
+});
+
+test("rejects invalid normalized numbers before report generation", () => {
+  assert.throws(() => analyzeSpans([span("bad", { durationMs: Number.POSITIVE_INFINITY })]), /non-finite durationMs/u);
+  assert.throws(() => analyzeSpans([span("bad", { inputTokens: Number.MAX_SAFE_INTEGER + 1 })]), /invalid inputTokens/u);
 });

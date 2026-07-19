@@ -61,6 +61,7 @@ function parseDocuments(text: string): unknown {
 export async function loadInput(path: string, maxBytes = DEFAULT_MAX_BYTES): Promise<unknown> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("maxBytes must be a positive integer");
   let stream: Readable;
+  let source: Readable | undefined;
   if (path === "-") {
     stream = stdin;
   } else {
@@ -68,9 +69,16 @@ export async function loadInput(path: string, maxBytes = DEFAULT_MAX_BYTES): Pro
     if (!info.isFile()) throw new Error(`Input is not a file: ${path}`);
     if (!path.toLowerCase().endsWith(".gz") && info.size > maxBytes) throw new InputLimitError(maxBytes);
     const file = createReadStream(path);
+    source = file;
     stream = path.toLowerCase().endsWith(".gz") ? file.pipe(createGunzip()) : file;
   }
-  return parseDocuments(await readBounded(stream, maxBytes));
+  try {
+    return parseDocuments(await readBounded(stream, maxBytes));
+  } catch (error) {
+    stream.destroy();
+    if (source !== undefined && source !== stream) source.destroy();
+    throw error;
+  }
 }
 
 export function parseInputText(text: string): unknown {

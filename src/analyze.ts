@@ -1,5 +1,6 @@
 import { pricingRate } from "./pricing.js";
-import { redactSpan } from "./redact.js";
+import { redactIdentifier, redactSpan, redactString } from "./redact.js";
+import { SENSITIVE_TRACE_ID, type InternalSpan } from "./internal.js";
 import type {
   AnalysisReport,
   CostSummary,
@@ -17,12 +18,27 @@ export interface AnalyzeOptions {
   pricing?: PricingFile;
 }
 
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function compareIdPaths(left: string[], right: string[]): number {
+  const length = Math.min(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const comparison = compareText(left[index] as string, right[index] as string);
+    if (comparison !== 0) return comparison;
+  }
+  return left.length - right.length;
+}
+
 function compareSpans(a: NormalizedSpan, b: NormalizedSpan): number {
-  return a.traceId.localeCompare(b.traceId) || a.startMs - b.startMs || a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
+  return compareText(a.traceId, b.traceId) || a.startMs - b.startMs || compareText(a.name, b.name) || compareText(a.id, b.id);
 }
 
 function round(value: number, places = 3): number {
   const multiplier = 10 ** places;
+  if (!Number.isFinite(value)) throw new Error("Analysis produced a non-finite number");
+  if (Math.abs(value) > Number.MAX_VALUE / multiplier) return value;
   return Math.round((value + Number.EPSILON) * multiplier) / multiplier;
 }
 
@@ -31,6 +47,16 @@ function quantile(values: number[], value: number): number {
   const sorted = [...values].sort((a, b) => a - b);
   const index = Math.max(0, Math.ceil(value * sorted.length) - 1);
   return round(sorted[index] ?? 0);
+}
+
+function addSafeInteger(left: number, right: number, label: string): number {
+  const result = left + right;
+  if (!Number.isSafeInteger(result)) throw new Error(`${label} exceeds JavaScript's safe integer range`);
+  return result;
+}
+
+function sumSafeIntegers(values: number[], label: string): number {
+  return values.reduce((sum, value) => addSafeInteger(sum, value, label), 0);
 }
 
 function signature(span: NormalizedSpan): string {
@@ -42,22 +68,84 @@ interface PathResult {
   duration: number;
 }
 
-function bestPath(rootId: string, byId: Map<string, NormalizedSpan>, children: Map<string, string[]>, visiting = new Set<string>()): PathResult {
-  const span = byId.get(rootId);
-  if (span === undefined || visiting.has(rootId)) return { ids: [], duration: 0 };
-  const nextVisiting = new Set(visiting).add(rootId);
-  let best: PathResult = { ids: [], duration: 0 };
-  for (const child of children.get(rootId) ?? []) {
-    const candidate = bestPath(child, byId, children, nextVisiting);
-    if (candidate.duration > best.duration || (candidate.duration === best.duration && candidate.ids.join("\0").localeCompare(best.ids.join("\0")) < 0)) best = candidate;
+const MAX_LOOP_FINDINGS = 1_000;
+const MAX_LOOP_EVIDENCE_IDS = 100;
+
+function pathComesFirst(candidate: string, current: string | undefined, nextById: Map<string, string>): boolean {
+  if (current === undefined) return false;
+  let left: string | undefined = candidate;
+  let right: string | undefined = current;
+  let remaining = nextById.size + 1;
+  while (left !== undefined && right !== undefined && remaining > 0) {
+    const comparison = compareText(left, right);
+    if (comparison !== 0) return comparison < 0;
+    left = nextById.get(left);
+    right = nextById.get(right);
+    remaining -= 1;
   }
-  return { ids: [rootId, ...best.ids], duration: round(span.durationMs + best.duration) };
+  return left === undefined && right !== undefined;
+}
+
+function bestPath(rootId: string, byId: Map<string, NormalizedSpan>, children: Map<string, string[]>): PathResult {
+  interface Frame { id: string; index: number; bestChild?: string }
+  if (!byId.has(rootId)) return { ids: [], duration: 0 };
+  const durationById = new Map<string, number>();
+  const nextById = new Map<string, string>();
+  const visiting = new Set<string>();
+  const stack: Frame[] = [{ id: rootId, index: 0 }];
+  visiting.add(rootId);
+
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1] as Frame;
+    const childIds = children.get(frame.id) ?? [];
+    if (frame.index < childIds.length) {
+      const child = childIds[frame.index] as string;
+      if (visiting.has(child)) {
+        frame.index += 1;
+        continue;
+      }
+      const childDuration = durationById.get(child);
+      if (childDuration === undefined) {
+        visiting.add(child);
+        stack.push({ id: child, index: 0 });
+        continue;
+      }
+      const currentDuration = frame.bestChild === undefined ? 0 : durationById.get(frame.bestChild) ?? 0;
+      if (childDuration > currentDuration || (childDuration === currentDuration && pathComesFirst(child, frame.bestChild, nextById))) {
+        frame.bestChild = child;
+      }
+      frame.index += 1;
+      continue;
+    }
+
+    const span = byId.get(frame.id) as NormalizedSpan;
+    const childDuration = frame.bestChild === undefined ? 0 : durationById.get(frame.bestChild) ?? 0;
+    durationById.set(frame.id, round(span.durationMs + childDuration));
+    if (frame.bestChild !== undefined) nextById.set(frame.id, frame.bestChild);
+    visiting.delete(frame.id);
+    stack.pop();
+  }
+
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  let current: string | undefined = rootId;
+  while (current !== undefined && !seen.has(current)) {
+    ids.push(current);
+    seen.add(current);
+    current = nextById.get(current);
+  }
+  return { ids, duration: durationById.get(rootId) ?? 0 };
 }
 
 function reachable(root: string, children: Map<string, string[]>, visited: Set<string>): void {
-  if (visited.has(root)) return;
-  visited.add(root);
-  for (const child of children.get(root) ?? []) reachable(child, children, visited);
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop() as string;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    const childIds = children.get(current) ?? [];
+    for (let index = childIds.length - 1; index >= 0; index -= 1) stack.push(childIds[index] as string);
+  }
 }
 
 function buildTrace(traceId: string, spans: NormalizedSpan[]): TraceSummary {
@@ -83,10 +171,14 @@ function buildTrace(traceId: string, spans: NormalizedSpan[]): TraceSummary {
   let critical: PathResult = { ids: [], duration: 0 };
   for (const root of roots) {
     const candidate = bestPath(root, byId, children);
-    if (candidate.duration > critical.duration || (candidate.duration === critical.duration && candidate.ids.join("\0").localeCompare(critical.ids.join("\0")) < 0)) critical = candidate;
+    if (candidate.duration > critical.duration || (candidate.duration === critical.duration && compareIdPaths(candidate.ids, critical.ids) < 0)) critical = candidate;
   }
-  const start = Math.min(...spans.map((span) => span.startMs));
-  const end = Math.max(...spans.map((span) => span.endMs));
+  let start = Number.POSITIVE_INFINITY;
+  let end = Number.NEGATIVE_INFINITY;
+  for (const span of spans) {
+    start = Math.min(start, span.startMs);
+    end = Math.max(end, span.endMs);
+  }
   return {
     id: traceId,
     rootIds: roots,
@@ -99,15 +191,16 @@ function buildTrace(traceId: string, spans: NormalizedSpan[]): TraceSummary {
   };
 }
 
-function findLoops(spans: NormalizedSpan[]): { loops: LoopFinding[]; retries: number } {
+function findLoops(spans: NormalizedSpan[]): { loops: LoopFinding[]; retries: number; truncated: boolean } {
   const byTrace = new Map<string, NormalizedSpan[]>();
   for (const span of spans) (byTrace.get(span.traceId) ?? byTrace.set(span.traceId, []).get(span.traceId) as NormalizedSpan[]).push(span);
   const findings: LoopFinding[] = [];
   let retries = 0;
-  for (const [traceId, traceSpans] of [...byTrace.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+  let truncated = false;
+  for (const [traceId, traceSpans] of [...byTrace.entries()].sort(([a], [b]) => compareText(a, b))) {
     const groups = new Map<string, NormalizedSpan[]>();
     for (const span of traceSpans) {
-      const key = `${span.parentId ?? "<root>"}\0${signature(span)}`;
+      const key = JSON.stringify([span.parentId ?? null, signature(span)]);
       const group = groups.get(key) ?? [];
       group.push(span);
       groups.set(key, group);
@@ -115,33 +208,80 @@ function findLoops(spans: NormalizedSpan[]): { loops: LoopFinding[]; retries: nu
     for (const group of groups.values()) {
       group.sort(compareSpans);
       retries += Math.max(0, group.length - 1);
-      if (group.length >= 3) findings.push({ traceId, signature: signature(group[0] as NormalizedSpan), spanIds: group.map((span) => span.id), reason: "repeated siblings" });
-    }
-
-    const byId = new Map(traceSpans.map((span) => [span.id, span]));
-    for (const span of traceSpans) {
-      const seen = new Map<string, string>();
-      const chain: string[] = [];
-      let current: NormalizedSpan | undefined = span;
-      const visitedIds = new Set<string>();
-      while (current !== undefined && !visitedIds.has(current.id)) {
-        visitedIds.add(current.id);
-        const sig = signature(current);
-        const earlier = seen.get(sig);
-        chain.push(current.id);
-        if (earlier !== undefined) {
-          const start = chain.indexOf(earlier);
-          findings.push({ traceId, signature: sig, spanIds: chain.slice(Math.max(0, start)), reason: "recursive path" });
-          break;
+      if (group.length >= 3) {
+        if (findings.length < MAX_LOOP_FINDINGS) {
+          findings.push({ traceId, signature: signature(group[0] as NormalizedSpan), spanIds: group.slice(0, MAX_LOOP_EVIDENCE_IDS).map((span) => span.id), reason: "repeated siblings" });
+        } else {
+          truncated = true;
         }
-        seen.set(sig, current.id);
-        current = current.parentId === undefined ? undefined : byId.get(current.parentId);
+        if (group.length > MAX_LOOP_EVIDENCE_IDS) truncated = true;
       }
     }
+
+    const ordered = [...traceSpans].sort(compareSpans);
+    const byId = new Map(ordered.map((span) => [span.id, span]));
+    const children = new Map<string, string[]>();
+    for (const span of ordered) {
+      if (span.parentId === undefined || span.parentId === span.id || !byId.has(span.parentId)) continue;
+      const bucket = children.get(span.parentId) ?? [];
+      bucket.push(span.id);
+      children.set(span.parentId, bucket);
+    }
+    for (const bucket of children.values()) bucket.sort((a, b) => compareSpans(byId.get(a) as NormalizedSpan, byId.get(b) as NormalizedSpan));
+    const roots = ordered.filter((span) => span.parentId === undefined || span.parentId === span.id || !byId.has(span.parentId)).map((span) => span.id);
+    const completed = new Set<string>();
+
+    const walk = (root: string): void => {
+      interface WalkFrame { id: string; exit: boolean }
+      const stack: WalkFrame[] = [{ id: root, exit: false }];
+      const activeIds = new Set<string>();
+      const path: string[] = [];
+      const positions = new Map<string, number[]>();
+      while (stack.length > 0) {
+        const frame = stack.pop() as WalkFrame;
+        const current = byId.get(frame.id);
+        if (current === undefined) continue;
+        const sig = signature(current);
+        if (frame.exit) {
+          const indexes = positions.get(sig);
+          indexes?.pop();
+          if (indexes?.length === 0) positions.delete(sig);
+          path.pop();
+          activeIds.delete(frame.id);
+          completed.add(frame.id);
+          continue;
+        }
+        if (completed.has(frame.id) || activeIds.has(frame.id)) continue;
+        const earlier = positions.get(sig)?.at(-1);
+        if (earlier !== undefined) {
+          if (findings.length < MAX_LOOP_FINDINGS) {
+            const evidenceStart = Math.max(earlier, path.length - (MAX_LOOP_EVIDENCE_IDS - 1));
+            findings.push({ traceId, signature: sig, spanIds: [...path.slice(evidenceStart), frame.id], reason: "recursive path" });
+            if (evidenceStart > earlier) truncated = true;
+          } else {
+            truncated = true;
+          }
+        }
+        const indexes = positions.get(sig) ?? [];
+        indexes.push(path.length);
+        positions.set(sig, indexes);
+        path.push(frame.id);
+        activeIds.add(frame.id);
+        stack.push({ id: frame.id, exit: true });
+        const childIds = children.get(frame.id) ?? [];
+        for (let index = childIds.length - 1; index >= 0; index -= 1) {
+          const child = childIds[index] as string;
+          if (!activeIds.has(child)) stack.push({ id: child, exit: false });
+        }
+      }
+    };
+
+    for (const root of roots) if (!completed.has(root)) walk(root);
+    for (const span of ordered) if (!completed.has(span.id)) walk(span.id);
   }
   const unique = new Map<string, LoopFinding>();
-  for (const finding of findings) unique.set(`${finding.traceId}\0${finding.reason}\0${finding.signature}\0${finding.spanIds.join(",")}`, finding);
-  return { loops: [...unique.values()].sort((a, b) => a.traceId.localeCompare(b.traceId) || a.signature.localeCompare(b.signature) || a.spanIds.join().localeCompare(b.spanIds.join())), retries };
+  for (const finding of findings) unique.set(JSON.stringify([finding.traceId, finding.reason, finding.signature, finding.spanIds]), finding);
+  return { loops: [...unique.values()].sort((a, b) => compareText(a.traceId, b.traceId) || compareText(a.signature, b.signature) || compareIdPaths(a.spanIds, b.spanIds)), retries, truncated };
 }
 
 function usageRows(spans: NormalizedSpan[], pricing?: PricingFile): { rows: UsageRow[]; cost?: CostSummary } {
@@ -154,27 +294,30 @@ function usageRows(spans: NormalizedSpan[], pricing?: PricingFile): { rows: Usag
     row.calls += 1;
     row.errors += span.status === "error" ? 1 : 0;
     row.durationMs = round(row.durationMs + span.durationMs);
-    row.inputTokens += span.inputTokens;
-    row.outputTokens += span.outputTokens;
+    row.inputTokens = addSafeInteger(row.inputTokens, span.inputTokens, "Aggregated input token count");
+    row.outputTokens = addSafeInteger(row.outputTokens, span.outputTokens, "Aggregated output token count");
     rows.set(key, row);
   }
   let estimatedUsd = 0;
   let pricedTokens = 0;
   let unpricedTokens = 0;
-  const result = [...rows.values()].sort((a, b) => a.type.localeCompare(b.type) || b.calls - a.calls || a.name.localeCompare(b.name));
+  const result = [...rows.values()].sort((a, b) => compareText(a.type, b.type) || b.calls - a.calls || compareText(a.name, b.name));
   if (pricing !== undefined) {
     for (const row of result) {
       if (row.type !== "model") continue;
       const rate = pricingRate(pricing, row.name);
       const tokens = row.inputTokens + row.outputTokens;
+      if (!Number.isSafeInteger(tokens)) throw new Error("Aggregated model token count exceeds JavaScript's safe integer range");
       if (rate === undefined) {
-        unpricedTokens += tokens;
+        unpricedTokens = addSafeInteger(unpricedTokens, tokens, "Unpriced token count");
         continue;
       }
       const rowCost = row.inputTokens * rate.inputPerMillion / 1_000_000 + row.outputTokens * rate.outputPerMillion / 1_000_000;
+      if (!Number.isFinite(rowCost)) throw new Error(`Cost estimate overflow for model ${JSON.stringify(row.name)}`);
       row.estimatedCostUsd = round(rowCost, 8);
       estimatedUsd += rowCost;
-      pricedTokens += tokens;
+      if (!Number.isFinite(estimatedUsd)) throw new Error("Total cost estimate overflowed");
+      pricedTokens = addSafeInteger(pricedTokens, tokens, "Priced token count");
     }
     return {
       rows: result,
@@ -185,12 +328,31 @@ function usageRows(spans: NormalizedSpan[], pricing?: PricingFile): { rows: Usag
 }
 
 function reproducibleTimestamp(spans: NormalizedSpan[]): string {
-  const latest = Math.max(...spans.map((span) => span.endMs));
+  let latest = Number.NEGATIVE_INFINITY;
+  for (const span of spans) latest = Math.max(latest, span.endMs);
   return latest >= 946_684_800_000 && latest <= 8_640_000_000_000_000 ? new Date(latest).toISOString() : "1970-01-01T00:00:00.000Z";
+}
+
+function validateSpans(spans: NormalizedSpan[]): void {
+  const ids = new Set<string>();
+  for (const span of spans) {
+    if (typeof span.id !== "string" || span.id.length === 0) throw new Error("Every span must have a non-empty string id");
+    if (ids.has(span.id)) throw new Error(`Duplicate normalized span id: ${span.id}`);
+    ids.add(span.id);
+    if (typeof span.traceId !== "string" || span.traceId.length === 0) throw new Error(`Span ${span.id} must have a non-empty traceId`);
+    for (const [name, value] of [["startMs", span.startMs], ["endMs", span.endMs], ["durationMs", span.durationMs]] as const) {
+      if (!Number.isFinite(value)) throw new Error(`Span ${span.id} has a non-finite ${name}`);
+    }
+    if (span.durationMs < 0) throw new Error(`Span ${span.id} has a negative durationMs`);
+    for (const [name, value] of [["inputTokens", span.inputTokens], ["outputTokens", span.outputTokens]] as const) {
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Span ${span.id} has an invalid ${name}`);
+    }
+  }
 }
 
 export function analyzeSpans(inputSpans: NormalizedSpan[], options: AnalyzeOptions = {}): AnalysisReport {
   if (inputSpans.length === 0) throw new Error("Cannot analyze an empty span list");
+  validateSpans(inputSpans);
   const spans = [...inputSpans].sort(compareSpans);
   const traceGroups = new Map<string, NormalizedSpan[]>();
   for (const span of spans) {
@@ -198,23 +360,44 @@ export function analyzeSpans(inputSpans: NormalizedSpan[], options: AnalyzeOptio
     bucket.push(span);
     traceGroups.set(span.traceId, bucket);
   }
-  const traces = [...traceGroups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([id, traceSpans]) => buildTrace(id, traceSpans));
+  const traces = [...traceGroups.entries()].sort(([a], [b]) => compareText(a, b)).map(([id, traceSpans]) => buildTrace(id, traceSpans));
   const loopResult = findLoops(spans);
   const usageResult = usageRows(spans, options.pricing);
-  const knownIds = new Set(spans.map((span) => span.id));
-  const orphanCount = spans.filter((span) => span.parentId !== undefined && !knownIds.has(span.parentId)).length;
+  const knownIds = new Map<string, Set<string>>();
+  for (const span of spans) {
+    const ids = knownIds.get(span.traceId) ?? new Set<string>();
+    ids.add(span.id);
+    knownIds.set(span.traceId, ids);
+  }
+  const orphanCount = spans.filter((span) => span.parentId !== undefined && !(knownIds.get(span.traceId)?.has(span.parentId) ?? false)).length;
   const zeroTiming = spans.filter((span) => span.startMs === 0 && span.durationMs === 0).length;
   const warnings: string[] = [];
   if (orphanCount > 0) warnings.push(`${orphanCount} span(s) reference a missing parent and were treated as roots.`);
   if (zeroTiming > 0) warnings.push(`${zeroTiming} span(s) have no usable timing information.`);
   if (usageResult.cost !== undefined && usageResult.cost.unpricedTokens > 0) warnings.push(`${usageResult.cost.unpricedTokens} model token(s) remain unpriced because no local rate matched.`);
+  if (loopResult.truncated) warnings.push(`Loop evidence was limited to ${MAX_LOOP_FINDINGS} findings and ${MAX_LOOP_EVIDENCE_IDS} span IDs per finding.`);
   const redact = options.redact ?? true;
+  const sensitiveTraceIds = new Set(spans.filter((span) => (span as InternalSpan)[SENSITIVE_TRACE_ID] === true).map((span) => span.traceId));
   const outputSpans = redact ? spans.map(redactSpan) : spans;
+  const outputTraces = redact ? traces.map((trace) => ({
+    ...trace,
+    id: redactIdentifier(trace.id, "trace", sensitiveTraceIds.has(trace.id)),
+    rootIds: trace.rootIds.map((id) => redactIdentifier(id, "span")),
+    spanIds: trace.spanIds.map((id) => redactIdentifier(id, "span")),
+    criticalPath: trace.criticalPath.map((id) => redactIdentifier(id, "span")),
+  })) : traces;
+  const outputUsage = redact ? usageResult.rows.map((row) => ({ ...row, name: redactString(row.name) })) : usageResult.rows;
+  const outputLoops = redact ? loopResult.loops.map((loop) => ({
+    ...loop,
+    traceId: redactIdentifier(loop.traceId, "trace", sensitiveTraceIds.has(loop.traceId)),
+    signature: redactString(loop.signature),
+    spanIds: loop.spanIds.map((id) => redactIdentifier(id, "span")),
+  })) : loopResult.loops;
   const report: AnalysisReport = {
     schemaVersion: "1.0",
-    title: options.title ?? "SpanGarden agent trace report",
+    title: redact ? redactString(options.title ?? "SpanGarden agent trace report") : options.title ?? "SpanGarden agent trace report",
     generatedAt: reproducibleTimestamp(spans),
-    source: options.source ?? "input",
+    source: redact ? redactString(options.source ?? "input") : options.source ?? "input",
     redacted: redact,
     summary: {
       traces: traces.length,
@@ -225,14 +408,14 @@ export function analyzeSpans(inputSpans: NormalizedSpan[], options: AnalyzeOptio
       totalDurationMs: round(traces.reduce((sum, trace) => sum + trace.durationMs, 0)),
       p50SpanMs: quantile(spans.map((span) => span.durationMs), 0.5),
       p95SpanMs: quantile(spans.map((span) => span.durationMs), 0.95),
-      inputTokens: spans.reduce((sum, span) => sum + span.inputTokens, 0),
-      outputTokens: spans.reduce((sum, span) => sum + span.outputTokens, 0),
+      inputTokens: sumSafeIntegers(spans.map((span) => span.inputTokens), "Total input token count"),
+      outputTokens: sumSafeIntegers(spans.map((span) => span.outputTokens), "Total output token count"),
     },
     ...(usageResult.cost === undefined ? {} : { cost: usageResult.cost }),
-    traces,
+    traces: outputTraces,
     spans: outputSpans,
-    usage: usageResult.rows,
-    loops: loopResult.loops,
+    usage: outputUsage,
+    loops: outputLoops,
     warnings,
   };
   return report;

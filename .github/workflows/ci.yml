@@ -15,8 +15,8 @@ jobs:
         node: [20, 22]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -28,11 +28,19 @@ jobs:
   package-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm pack --dry-run
+      - name: Exercise the packed CLI and public ESM API
+        run: |
+          set -euo pipefail
+          package_tarball="$(npm pack --silent)"
+          mkdir "${RUNNER_TEMP}/spangarden-consumer"
+          npm install --silent --prefix "${RUNNER_TEMP}/spangarden-consumer" "./${package_tarball}"
+          "${RUNNER_TEMP}/spangarden-consumer/node_modules/.bin/spangarden" --version
+          cd "${RUNNER_TEMP}/spangarden-consumer"
+          node --input-type=module --eval "import { adaptSpans } from 'spangarden'; if (adaptSpans({spans:[{id:'ok',name:'ok'}]}).length !== 1) process.exit(1)"
       - run: node dist/src/cli.js examples/agent-run.json --format json --pricing examples/pricing.json > /dev/null

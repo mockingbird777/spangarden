@@ -26,12 +26,14 @@ Agent traces are rich and awkward: nested spans, vendor-shaped attributes, retri
   1 traces   6 spans   2 errors   2 retry candidates
   2.85s wall time   p50 280ms   p95 2.85s
   3,420 in / 1,196 out tokens
+  $0.0116 estimated from local pricing (0 unpriced tokens)
 
   CRITICAL PATHS
   garden-demo-01  3.93s  agent.plan_trip → chat final answer
 
   USAGE
-  model  orchid-2                   1 calls     1.08s  0 err  $0.010360
+  model  orchid-2                   1 calls     1.08s  0 err  $0.0104
+  model  orchid-2-mini              1 calls      680ms  0 err  $0.001210
   tool   weather                    3 calls      720ms  2 err
 ```
 
@@ -87,6 +89,8 @@ The HTML report is one portable file with search, kind filters, critical-path hi
 - Trace wall time and p50/p95 span latency
 - Optional per-model cost estimates with priced/unpriced token accounting
 
+Loop evidence is bounded to 1,000 findings and 100 span IDs per finding so adversarial repetition cannot multiply report size without limit; a report note appears when evidence is clipped.
+
 Loop and retry results are deliberately labeled **signals** and **candidates**. They guide an investigation; they do not pretend to know application intent.
 
 ## Input adapters
@@ -98,7 +102,7 @@ SpanGarden accepts regular JSON, newline-delimited JSON, and gzip files ending i
 - Generic `spans`, `traces`, `runs`, `events`, `children`, and `steps`
 - Top-level span arrays and JSONL span records
 
-Common snake_case and camelCase IDs, parents, timestamps, durations, statuses, models, tools, and token fields are normalized. OpenTelemetry attribute arrays and value wrappers are decoded. Unknown attributes stay in the report instead of being thrown away.
+Common snake_case and camelCase IDs, parents (including `parent_run_id`), timestamps, durations, statuses, models, tools, and token fields are normalized. OpenTelemetry attribute arrays, `arrayValue`, and `kvlistValue` wrappers are decoded. Nested generic children inherit their enclosing trace and parent even when the enclosing span needs a generated ID. Unknown attributes stay in the report instead of being thrown away.
 
 Minimal generic input:
 
@@ -111,7 +115,22 @@ Minimal generic input:
 }
 ```
 
-Timestamp support includes ISO strings, millisecond numbers, and OpenTelemetry Unix nanosecond fields. When timestamps are absent, analysis continues and adds a warning.
+Timestamp support includes ISO strings, millisecond numbers, and OpenTelemetry Unix nanosecond fields with sub-millisecond precision where JavaScript numbers permit it. When timestamps are absent, analysis continues and adds a warning.
+
+## Programmatic API
+
+The packed ESM entry point exposes the same adapter, analysis, formatting, input, pricing, and redaction primitives used by the CLI:
+
+```bash
+npm install github:mockingbird777/spangarden
+```
+
+```js
+import { adaptSpans, analyzeSpans, formatReport } from "spangarden";
+
+const report = analyzeSpans(adaptSpans(rawTrace));
+const markdown = formatReport(report, "markdown");
+```
 
 ## Local pricing
 
@@ -135,9 +154,9 @@ Exact model names are preferred, matching is case-insensitive, and `*` is an opt
 
 ## Privacy by default
 
-SpanGarden performs no network requests. Before output, it redacts sensitive-looking keys such as prompts/message content, authorization headers, API keys, passwords, cookies, private keys, and session IDs. It also masks common bearer credentials, `sk-…` keys, AWS access IDs, JWTs, email addresses, and secret-bearing URL parameters inside strings.
+SpanGarden performs no network requests. Before output, it redacts sensitive-looking keys such as prompts/message content, authorization headers, token/key/email fields, passwords, cookies, private keys, and session IDs. It also masks common bearer credentials, OpenAI/GitHub/Slack/Google/AWS credentials, JWTs, email addresses, private-key blocks, and secret-bearing URL parameters inside strings. The same protection is applied to report metadata, aggregate labels, and credential-shaped identifiers; affected identifiers become stable one-way aliases so parent and critical-path links remain intact.
 
-Token **count** fields are preserved. Redaction can miss domain-specific data, so inspect artifacts before sharing them.
+Token **count** fields are preserved. Redaction can miss domain-specific data, so inspect artifacts before sharing them. Markdown text and terminal controls are neutralized, and the self-contained HTML uses encoded data, DOM text nodes, and a restrictive Content Security Policy.
 
 ```bash
 # Only for controlled local debugging; a warning is written to stderr.

@@ -9,7 +9,7 @@ test("renders terminal, JSON, and Markdown reports", () => {
   assert.match(formatReport(report, "terminal"), /SPANGARDEN/u);
   assert.deepEqual(JSON.parse(formatReport(report, "json")), report);
   const md = formatReport(report, "markdown");
-  assert.match(md, /# Example \| report/u);
+  assert.match(md, /# Example \\\| report/u);
   assert.match(md, /Model and tool usage/u);
 });
 
@@ -28,4 +28,18 @@ test("HTML is self-contained and makes no remote asset references", () => {
   assert.ok(!/https?:\/\//u.test(output));
   assert.ok(!/<script\s+src=/u.test(output));
   assert.ok(!/<link\s+[^>]*href=/u.test(output));
+  assert.match(output, /base-uri 'none'/u);
+});
+
+test("neutralizes terminal controls and Markdown/HTML syntax from trace text", () => {
+  const payload = '<img src=x onerror="alert(1)"> [click](javascript:alert(1))\u001b]0;owned';
+  const report = analyzeSpans([span("x", { name: `line one\n${payload}`, kind: "model", model: payload })], { title: payload, redact: false });
+  const terminal = formatReport(report, "terminal");
+  assert.ok(!terminal.includes("\u001b"));
+  assert.ok(!terminal.includes("line one\n<img"));
+  const markdown = formatReport(report, "markdown");
+  assert.ok(!markdown.includes("<img"));
+  assert.match(markdown, /&lt;img/u);
+  assert.ok(!markdown.includes("](javascript:"));
+  assert.deepEqual(JSON.parse(formatReport(report, "json")), report);
 });
