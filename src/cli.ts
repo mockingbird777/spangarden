@@ -51,9 +51,9 @@ gzip decompression, and HTML reports are self-contained.
 
 function parseArgs(args: string[]): CliOptions | "help" | "version" {
   const result: CliOptions = { format: "terminal", maxBytes: DEFAULT_MAX_BYTES, redact: true, demo: false, failOnErrors: false };
-  const take = (flag: string, index: number): string => {
+  const take = (flag: string, index: number, allowDash = false): string => {
     const value = args[index + 1];
-    if (value === undefined || value.startsWith("-")) throw new Error(`${flag} requires a value`);
+    if (value === undefined || (value.startsWith("-") && !(allowDash && value === "-"))) throw new Error(`${flag} requires a value`);
     return value;
   };
   for (let index = 0; index < args.length; index += 1) {
@@ -69,7 +69,7 @@ function parseArgs(args: string[]): CliOptions | "help" | "version" {
       result.format = value as OutputFormat;
       index += 1;
     } else if (arg === "--output" || arg === "-o") {
-      result.output = take(arg, index);
+      result.output = take(arg, index, true);
       index += 1;
     } else if (arg === "--pricing") {
       result.pricing = take(arg, index);
@@ -82,7 +82,8 @@ function parseArgs(args: string[]): CliOptions | "help" | "version" {
       if (!Number.isSafeInteger(value) || value < 1024 || value > 1024 * 1024 * 1024) throw new Error("--max-bytes must be an integer from 1024 to 1073741824");
       result.maxBytes = value;
       index += 1;
-    } else if (arg.startsWith("-")) throw new Error(`Unknown option: ${arg}`);
+    } else if (arg === "-" && result.input === undefined) result.input = arg;
+    else if (arg.startsWith("-")) throw new Error(`Unknown option: ${arg}`);
     else if (result.input === undefined) result.input = arg;
     else throw new Error(`Unexpected argument: ${arg}`);
   }

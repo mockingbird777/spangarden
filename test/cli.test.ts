@@ -7,7 +7,7 @@ import test from "node:test";
 
 interface RunResult { code: number | null; stdout: string; stderr: string }
 
-async function run(args: string[]): Promise<RunResult> {
+async function run(args: string[], input?: string): Promise<RunResult> {
   return await new Promise((resolveRun, reject) => {
     const child = spawn(process.execPath, [resolve("dist/src/cli.js"), ...args], { cwd: process.cwd() });
     let out = "";
@@ -16,6 +16,7 @@ async function run(args: string[]): Promise<RunResult> {
     child.stderr.setEncoding("utf8").on("data", (chunk: string) => { err += chunk; });
     child.on("error", reject);
     child.on("close", (code) => resolveRun({ code, stdout: out, stderr: err }));
+    child.stdin.end(input);
   });
 }
 
@@ -27,6 +28,19 @@ test("runs the built-in demo as machine-readable JSON", async () => {
   assert.equal(report.summary.errors, 2);
   assert.equal(report.redacted, true);
   assert.equal(result.stderr, "");
+});
+
+test("accepts documented stdin input and an explicit stdout output target", async () => {
+  const input = JSON.stringify({ spans: [{ id: "run", name: "agent.run", duration_ms: 20 }] });
+  const piped = await run(["-", "--format", "json"], input);
+  assert.equal(piped.code, 0, piped.stderr);
+  const report = JSON.parse(piped.stdout) as { source: string; summary: { spans: number } };
+  assert.equal(report.source, "stdin");
+  assert.equal(report.summary.spans, 1);
+
+  const explicitStdout = await run(["--demo", "--format", "json", "--output", "-"]);
+  assert.equal(explicitStdout.code, 0, explicitStdout.stderr);
+  assert.equal((JSON.parse(explicitStdout.stdout) as { summary: { spans: number } }).summary.spans, 6);
 });
 
 test("writes output atomically with owner-only file permissions", async (t) => {
@@ -53,5 +67,5 @@ test("prints concise usage errors and version", async () => {
   assert.equal(invalid.code, 1);
   assert.match(invalid.stderr, /Unknown option/u);
   const version = await run(["--version"]);
-  assert.equal(version.stdout, "0.1.0\n");
+  assert.equal(version.stdout, "0.1.1\n");
 });

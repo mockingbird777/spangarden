@@ -23,12 +23,14 @@ test("embeds HTML data without exposing script-closing input", () => {
   assert.match(output, /atob\("[A-Za-z0-9+/=]+"\)/u);
 });
 
-test("HTML is self-contained and makes no remote asset references", () => {
+test("HTML is self-contained while providing an explicit repository link", () => {
   const output = formatReport(analyzeSpans([span("one")]), "html");
-  assert.ok(!/https?:\/\//u.test(output));
-  assert.ok(!/<script\s+src=/u.test(output));
-  assert.ok(!/<link\s+[^>]*href=/u.test(output));
+  assert.ok(!/<script\s+[^>]*src=["']https?:\/\//u.test(output));
+  assert.ok(!/<link\s+[^>]*href=["']https?:\/\//u.test(output));
+  assert.ok(!/<img\s+[^>]*src=["']https?:\/\//u.test(output));
+  assert.match(output, /href="https:\/\/github\.com\/mockingbird777\/spangarden"/u);
   assert.match(output, /base-uri 'none'/u);
+  assert.match(output, /name="referrer" content="no-referrer"/u);
 });
 
 test("neutralizes terminal controls and Markdown/HTML syntax from trace text", () => {

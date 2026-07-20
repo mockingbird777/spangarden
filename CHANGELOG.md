@@ -4,10 +4,14 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-20
+
 ### Added
 
 - A documented ESM package entry point and packed-artifact CI smoke test.
 - OTLP `kvlistValue`, fractional nanosecond, forward-parent, nested trace inheritance, and `parent_run_id` coverage.
+- Add clear GitHub source and star links to generated interactive reports.
+- Add a 1280×640 repository social preview and a question-led first-visit README.
 
 ### Changed
 
@@ -21,6 +25,7 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - Apply default redaction across identifiers, metadata, usage rows, and loop findings, including additional credential patterns.
 - Neutralize terminal control sequences and Markdown syntax from untrusted trace text; strengthen the HTML CSP.
 - Scope orphan detection to each trace and guard numeric aggregation, cost overflow, and prototype-shaped pricing names.
+- Accept the documented `-` stdin target and `--output -` stdout target in the CLI.
 
 ## [0.1.0] - 2026-07-19
 
@@ -31,3 +36,7 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - Opt-in cost estimates driven exclusively by a local pricing file.
 - Terminal, JSON, Markdown, and self-contained interactive HTML reports.
 - Default redaction and a decompressed input-size boundary.
+
+[Unreleased]: https://github.com/mockingbird777/spangarden/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/mockingbird777/spangarden/releases/tag/v0.1.1
+[0.1.0]: https://github.com/mockingbird777/spangarden/releases/tag/v0.1.0

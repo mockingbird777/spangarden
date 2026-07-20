@@ -18,23 +18,28 @@
 
 ---
 
+![SpanGarden — turn agent traces into answers](assets/social-preview.svg)
+
+**SpanGarden answers the questions raw traces leave open: where did the run stall, what retried, which model or tool dominated, and what can you safely share?**
+
 Agent traces are rich and awkward: nested spans, vendor-shaped attributes, retries that look like normal calls, and token numbers without context. SpanGarden turns those exports into one reproducible report on your machine—no collector, database, Docker image, account, or cloud upload.
 
 ```text
-  SPANGARDEN  Travel planner investigation
+  SPANGARDEN  SpanGarden agent trace report
   ──────────────────────────────────────────────────────────────
   1 traces   6 spans   2 errors   2 retry candidates
   2.85s wall time   p50 280ms   p95 2.85s
   3,420 in / 1,196 out tokens
-  $0.0116 estimated from local pricing (0 unpriced tokens)
-
   CRITICAL PATHS
   garden-demo-01  3.93s  agent.plan_trip → chat final answer
 
   USAGE
-  model  orchid-2                   1 calls     1.08s  0 err  $0.0104
-  model  orchid-2-mini              1 calls      680ms  0 err  $0.001210
+  model  orchid-2                   1 calls     1.08s  0 err
+  model  orchid-2-mini              1 calls      680ms  0 err
   tool   weather                    3 calls      720ms  2 err
+
+  LOOP SIGNALS
+  repeated siblings  tool:weather  [weather-1 → weather-2 → weather-3]
 ```
 
 ## Why SpanGarden
@@ -50,12 +55,20 @@ Agent traces are rich and awkward: nested spans, vendor-shaped attributes, retri
 
 ## Quick start
 
-Run directly from GitHub with Node.js 20+:
+Get the result above from a built-in synthetic OpenTelemetry trace—no trace file, backend, or API key required:
 
 ```bash
 npx --yes github:mockingbird777/spangarden --demo
+```
+
+Turn the same demo into a portable interactive report, or analyze your own export:
+
+```bash
+npx --yes github:mockingbird777/spangarden --demo --format html --output spangarden-report.html
 npx --yes github:mockingbird777/spangarden ./trace.json --format html --output report.html
 ```
+
+Both commands run with Node.js 20+. Open the generated HTML file directly in a browser; it contains the report, styles, and interaction code in one file and loads no remote assets.
 
 Or clone for repeat use:
 
@@ -78,6 +91,17 @@ cat run.jsonl | spangarden - --format json
 ```
 
 The HTML report is one portable file with search, kind filters, critical-path highlighting, usage tables, and loop evidence. It loads no remote assets.
+
+## Where it fits
+
+| Approach | Best at | What SpanGarden adds |
+|---|---|---|
+| Hosted observability backend | Always-on ingestion, retention, alerting, and team dashboards | A local investigation path with no service, account, or upload |
+| Raw OTel viewer | Inspecting individual spans and attributes | Agent-aware critical paths, retries/loops, model/tool rollups, token totals, and opt-in cost arithmetic |
+| One-off scripts | Answering one question for one trace shape | Tolerant adapters, deterministic reports, default redaction, and four stable output formats |
+| SpanGarden | Fast local diagnosis and shareable artifacts | Zero runtime dependencies and one self-contained interactive HTML report |
+
+SpanGarden is an investigation tool, not a collector, long-term trace store, billing system, or production alerting platform.
 
 ## What it analyzes
 
@@ -197,6 +221,12 @@ npm audit
 ```
 
 The implementation uses strict TypeScript and Node's standard library. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the [changelog](CHANGELOG.md).
+
+## Contributing
+
+Useful first contributions include a minimized synthetic fixture for an unsupported trace shape, an adapter regression test, a redaction pattern with safe look-alikes, or an accessibility improvement to the HTML report. Please do not attach production prompts, credentials, customer traces, or identifying telemetry.
+
+Start with a [feature request](https://github.com/mockingbird777/spangarden/issues/new?template=feature.yml) or read the [contributor guide](CONTRIBUTING.md). Every adapter change should include a focused fixture and deterministic test.
 
 ## Roadmap
 
