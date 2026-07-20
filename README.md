@@ -87,6 +87,7 @@ spangarden run.jsonl --format terminal
 spangarden run.json.gz --format json --output report.json
 spangarden run.json --format markdown --output investigation.md
 spangarden run.json --format html --output investigation.html
+spangarden run.json --output report.html          # format inferred from the extension
 cat run.jsonl | spangarden - --format json
 ```
 
@@ -198,7 +199,8 @@ spangarden large.jsonl.gz --max-bytes 268435456
 ```text
 spangarden <trace.json|trace.jsonl|trace.json.gz|-> [options]
 
--f, --format <type>    terminal, json, markdown, or html
+-f, --format <type>    terminal, json, markdown, or html (inferred from
+                       the --output extension when omitted)
 -o, --output <path>   atomically write a file (mode 0600)
     --pricing <path>  local USD pricing JSON (maximum 1 MiB)
     --title <text>     report title

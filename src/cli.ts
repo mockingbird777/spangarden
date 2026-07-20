@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, extname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { rename, unlink, writeFile } from "node:fs/promises";
 import { stderr, stdout } from "node:process";
@@ -31,7 +31,8 @@ Usage:
   spangarden --demo --format html --output report.html
 
 Options:
-  -f, --format <type>    terminal, json, markdown, or html (default: terminal)
+  -f, --format <type>    terminal, json, markdown, or html (default: terminal,
+                         or inferred from the --output file extension)
   -o, --output <path>   Write atomically to a file instead of stdout
       --pricing <path>  Local USD pricing JSON; no prices are fetched
       --title <text>     Report title
@@ -49,8 +50,17 @@ SpanGarden performs no network requests. JSON/JSONL input is bounded after
 gzip decompression, and HTML reports are self-contained.
 `;
 
+const EXTENSION_FORMATS: Readonly<Record<string, OutputFormat>> = {
+  ".html": "html",
+  ".htm": "html",
+  ".json": "json",
+  ".md": "markdown",
+  ".markdown": "markdown",
+};
+
 function parseArgs(args: string[]): CliOptions | "help" | "version" {
   const result: CliOptions = { format: "terminal", maxBytes: DEFAULT_MAX_BYTES, redact: true, demo: false, failOnErrors: false };
+  let formatExplicit = false;
   const take = (flag: string, index: number, allowDash = false): string => {
     const value = args[index + 1];
     if (value === undefined || (value.startsWith("-") && !(allowDash && value === "-"))) throw new Error(`${flag} requires a value`);
@@ -67,6 +77,7 @@ function parseArgs(args: string[]): CliOptions | "help" | "version" {
       const value = take(arg, index);
       if (!(["terminal", "json", "markdown", "html"] as string[]).includes(value)) throw new Error(`Unknown format: ${value}`);
       result.format = value as OutputFormat;
+      formatExplicit = true;
       index += 1;
     } else if (arg === "--output" || arg === "-o") {
       result.output = take(arg, index, true);
@@ -89,6 +100,13 @@ function parseArgs(args: string[]): CliOptions | "help" | "version" {
   }
   if (result.demo && result.input !== undefined) throw new Error("Use either an input path or --demo, not both");
   if (!result.demo && result.input === undefined) throw new Error("Provide a trace path, '-' for stdin, or --demo");
+  // An explicit --format always wins; otherwise a recognised --output file
+  // extension picks the format. Stdout ("-"), unknown, and missing
+  // extensions keep the terminal default.
+  if (!formatExplicit && result.output !== undefined && result.output !== "-") {
+    const inferred = EXTENSION_FORMATS[extname(result.output).toLowerCase()];
+    if (inferred !== undefined) result.format = inferred;
+  }
   return result;
 }
 
