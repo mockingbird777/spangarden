@@ -69,3 +69,51 @@ test("prints concise usage errors and version", async () => {
   const version = await run(["--version"]);
   assert.equal(version.stdout, "0.1.1\n");
 });
+
+test("infers the format from the --output extension when --format is absent", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "spangarden-cli-"));
+  t.after(async () => rm(directory, { recursive: true, force: true }));
+
+  const cases: Array<[string, RegExp]> = [
+    ["report.html", /<!doctype html>/u],
+    ["report.HTM", /<!doctype html>/u],
+    ["report.json", /^\{/u],
+    ["report.md", /^# /u],
+    ["report.markdown", /^# /u],
+  ];
+  for (const [name, expected] of cases) {
+    const output = join(directory, name);
+    const result = await run(["--demo", "--output", output]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(await readFile(output, "utf8"), expected, name);
+  }
+});
+
+test("explicit --format overrides a conflicting --output extension", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "spangarden-cli-"));
+  t.after(async () => rm(directory, { recursive: true, force: true }));
+  const output = join(directory, "report.html");
+  const result = await run(["--demo", "--format", "json", "--output", output]);
+  assert.equal(result.code, 0, result.stderr);
+  const written = await readFile(output, "utf8");
+  assert.doesNotMatch(written, /<!doctype html>/u);
+  assert.equal((JSON.parse(written) as { summary: { spans: number } }).summary.spans, 6);
+});
+
+test("unknown or missing extensions and stdout keep the terminal default", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "spangarden-cli-"));
+  t.after(async () => rm(directory, { recursive: true, force: true }));
+
+  for (const name of ["report.txt", "report"]) {
+    const output = join(directory, name);
+    const result = await run(["--demo", "--output", output]);
+    assert.equal(result.code, 0, result.stderr);
+    const written = await readFile(output, "utf8");
+    assert.doesNotMatch(written, /<!doctype html>/u);
+    assert.match(result.stderr, /wrote terminal/u, name);
+  }
+
+  const stdoutRun = await run(["--demo", "--output", "-"]);
+  assert.equal(stdoutRun.code, 0);
+  assert.match(stdoutRun.stdout, /SPANGARDEN/u);
+});
