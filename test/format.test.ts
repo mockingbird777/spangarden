@@ -25,6 +25,17 @@ test("embeds HTML data without exposing script-closing input", () => {
 
 test("HTML is self-contained while providing an explicit repository link", () => {
   const output = formatReport(analyzeSpans([span("one")]), "html");
+  const description = "Explore AI-agent critical paths, retries, errors, token usage, and estimated cost in a local-first SpanGarden trace report.";
+  for (const metadata of [
+    `<meta name="description" content="${description}">`,
+    '<meta property="og:type" content="website">',
+    '<meta property="og:title" content="SpanGarden agent trace report · SpanGarden">',
+    `<meta property="og:description" content="${description}">`,
+    '<meta name="twitter:card" content="summary">',
+    '<meta name="twitter:title" content="SpanGarden agent trace report · SpanGarden">',
+    `<meta name="twitter:description" content="${description}">`
+  ]) assert.ok(output.includes(metadata), `missing metadata: ${metadata}`);
+  assert.doesNotMatch(output, /(?:og:image|twitter:image)/u);
   assert.ok(!/<script\s+[^>]*src=["']https?:\/\//u.test(output));
   assert.ok(!/<link\s+[^>]*href=["']https?:\/\//u.test(output));
   assert.ok(!/<img\s+[^>]*src=["']https?:\/\//u.test(output));
@@ -44,4 +55,14 @@ test("neutralizes terminal controls and Markdown/HTML syntax from trace text", (
   assert.match(markdown, /&lt;img/u);
   assert.ok(!markdown.includes("](javascript:"));
   assert.deepEqual(JSON.parse(formatReport(report, "json")), report);
+});
+
+test("escapes dynamic HTML and social metadata titles", () => {
+  const title = `Plan "alpha" & <script>alert(1)</script> 'beta'`;
+  const output = formatReport(analyzeSpans([span("one")], { title, redact: false }), "html");
+  const escaped = "Plan &quot;alpha&quot; &amp; &lt;script&gt;alert(1)&lt;/script&gt; &#39;beta&#39; · SpanGarden";
+  assert.ok(output.includes(`<title>${escaped}</title>`));
+  assert.ok(output.includes(`<meta property="og:title" content="${escaped}">`));
+  assert.ok(output.includes(`<meta name="twitter:title" content="${escaped}">`));
+  assert.ok(!output.includes(`<title>${title} · SpanGarden</title>`));
 });
