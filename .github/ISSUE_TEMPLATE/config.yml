@@ -3,3 +3,6 @@ contact_links:
   - name: Private security report
     url: https://github.com/mockingbird777/spangarden/security/advisories/new
     about: Report vulnerabilities without exposing trace data.
+  - name: Questions and ideas
+    url: https://github.com/mockingbird777/spangarden/discussions
+    about: Ask for help or discuss an idea before opening an issue.
