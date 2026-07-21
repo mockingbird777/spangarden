@@ -4,6 +4,10 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Added
+
+- Normalize `durationNs`/`duration_ns` nanosecond duration fields to milliseconds, after the existing millisecond fields.
+
 ## [0.1.1] - 2026-07-20
 
 ### Added
