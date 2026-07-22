@@ -123,7 +123,7 @@ function parseTime(value: unknown, nanoseconds: boolean): number | undefined {
 function looksLikeSpan(record: Record<string, unknown>): boolean {
   const hasId = first(record, ["spanId", "span_id", "id", "run_id"]) !== undefined;
   const hasName = first(record, ["name", "operation", "event", "type", "run_type"]) !== undefined;
-  const hasTiming = first(record, ["startTimeUnixNano", "start_time_unix_nano", "startTime", "start_time", "started_at", "timestamp", "durationMs", "duration_ms"]) !== undefined;
+  const hasTiming = first(record, ["startTimeUnixNano", "start_time_unix_nano", "startTime", "start_time", "started_at", "timestamp", "durationMs", "duration_ms", "durationNs", "duration_ns"]) !== undefined;
   return (hasId && (hasName || hasTiming)) || (hasName && hasTiming);
 }
 
@@ -256,7 +256,11 @@ function normalize(candidate: Candidate, usedIds: Set<string>): NormalizedSpan {
   const startNano = first(record, ["startTimeUnixNano", "start_time_unix_nano"]);
   const endNano = first(record, ["endTimeUnixNano", "end_time_unix_nano"]);
   const start = parseTime(startNano ?? first(record, ["startTime", "start_time", "started_at", "timestamp", "time"]), startNano !== undefined) ?? 0;
-  const explicitDuration = numberValue(first(record, ["durationMs", "duration_ms", "latency_ms"]));
+  const explicitDurationMs = numberValue(first(record, ["durationMs", "duration_ms", "latency_ms"]));
+  const explicitDurationNs = numberValue(first(record, ["durationNs", "duration_ns"]));
+  // ms fields keep precedence; a nanosecond field converts to ms as a fallback.
+  const explicitDuration =
+    explicitDurationMs ?? (explicitDurationNs === undefined ? undefined : explicitDurationNs / 1e6);
   const endParsed = parseTime(endNano ?? first(record, ["endTime", "end_time", "ended_at"]), endNano !== undefined);
   const duration = Math.max(0, explicitDuration ?? (endParsed === undefined ? 0 : endParsed - start));
   const end = endParsed ?? start + duration;

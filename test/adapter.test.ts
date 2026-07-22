@@ -130,3 +130,37 @@ test("does not misclassify ID-only wrappers and handles cyclic or deeply nested 
 test("rejects input without recognizable spans", () => {
   assert.throws(() => adaptSpans({ hello: "garden" }), /No trace spans found/u);
 });
+
+test("normalizes durationNs and duration_ns nanosecond fields to milliseconds", () => {
+  const spans = adaptSpans({ spans: [
+    { id: "camel", trace_id: "t", name: "a", durationNs: 1_500_000 },
+    { id: "snake", trace_id: "t", name: "b", duration_ns: 2_000_000 },
+    { id: "str", trace_id: "t", name: "c", duration_ns: "3000000" },
+  ] });
+  assert.equal(spans.find((s) => s.id === "camel")?.durationMs, 1.5);
+  assert.equal(spans.find((s) => s.id === "snake")?.durationMs, 2);
+  assert.equal(spans.find((s) => s.id === "str")?.durationMs, 3);
+});
+
+test("millisecond duration fields keep precedence over nanosecond fields", () => {
+  const spans = adaptSpans({ spans: [
+    { id: "x", trace_id: "t", name: "a", durationMs: 40, durationNs: 999_000_000 },
+  ] });
+  assert.equal(spans[0]?.durationMs, 40);
+});
+
+test("invalid or negative durationNs never yields a negative duration", () => {
+  const spans = adaptSpans({ spans: [
+    { id: "neg", trace_id: "t", name: "a", duration_ns: -5_000_000 },
+    { id: "nan", trace_id: "t", name: "b", duration_ns: "not-a-number" },
+    { id: "inf", trace_id: "t", name: "c", duration_ns: Infinity },
+  ] });
+  for (const s of spans) assert.equal(s.durationMs, 0);
+});
+
+test("end-minus-start fallback is unchanged when no explicit duration is present", () => {
+  const spans = adaptSpans({ spans: [
+    { id: "span", trace_id: "t", name: "a", start_time: 100, end_time: 175 },
+  ] });
+  assert.equal(spans[0]?.durationMs, 75);
+});

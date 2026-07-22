@@ -127,7 +127,7 @@ SpanGarden accepts regular JSON, newline-delimited JSON, and gzip files ending i
 - Generic `spans`, `traces`, `runs`, `events`, `children`, and `steps`
 - Top-level span arrays and JSONL span records
 
-Common snake_case and camelCase IDs, parents (including `parent_run_id`), timestamps, durations, statuses, models, tools, and token fields are normalized. OpenTelemetry attribute arrays, `arrayValue`, and `kvlistValue` wrappers are decoded. Nested generic children inherit their enclosing trace and parent even when the enclosing span needs a generated ID. Unknown attributes stay in the report instead of being thrown away.
+Common snake_case and camelCase IDs, parents (including `parent_run_id`), timestamps, durations, statuses, models, tools, and token fields are normalized. Explicit durations are read from `durationMs`/`duration_ms`/`latency_ms` (milliseconds) or, as a fallback, `durationNs`/`duration_ns` (nanoseconds, converted to ms); when none are present, duration is derived from start and end timestamps. OpenTelemetry attribute arrays, `arrayValue`, and `kvlistValue` wrappers are decoded. Nested generic children inherit their enclosing trace and parent even when the enclosing span needs a generated ID. Unknown attributes stay in the report instead of being thrown away.
 
 Minimal generic input:
 
