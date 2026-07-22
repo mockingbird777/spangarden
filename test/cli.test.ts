@@ -23,9 +23,18 @@ async function run(args: string[], input?: string): Promise<RunResult> {
 test("runs the built-in demo as machine-readable JSON", async () => {
   const result = await run(["--demo", "--format", "json"]);
   assert.equal(result.code, 0);
-  const report = JSON.parse(result.stdout) as { summary: { spans: number; errors: number }; redacted: boolean };
+  const report = JSON.parse(result.stdout) as {
+    schemaVersion: string;
+    summary: { spans: number; errors: number; recoveredRetries: number };
+    recoveryLedger: Array<{ failedAttempts: unknown[]; recoveredBy: { spanId: string } }>;
+    redacted: boolean;
+  };
+  assert.equal(report.schemaVersion, "1.1");
   assert.equal(report.summary.spans, 6);
   assert.equal(report.summary.errors, 2);
+  assert.equal(report.summary.recoveredRetries, 2);
+  assert.equal(report.recoveryLedger[0]?.failedAttempts.length, 2);
+  assert.equal(report.recoveryLedger[0]?.recoveredBy.spanId, "weather-3");
   assert.equal(report.redacted, true);
   assert.equal(result.stderr, "");
 });

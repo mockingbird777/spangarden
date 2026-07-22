@@ -30,6 +30,104 @@ test("counts repeated siblings as retries and surfaces a loop at three calls", (
   assert.deepEqual(report.loops[0]?.spanIds, ["try-1", "try-2", "try-3"]);
 });
 
+test("builds a verifiable Recovery Ledger for serial failed attempts followed by a non-failure", () => {
+  const spans = [
+    span("root", { startMs: 1, endMs: 120, durationMs: 119 }),
+    span("failed-1", {
+      parentId: "root", kind: "model", model: "alpha", name: "chat", status: "error",
+      startMs: 10, endMs: 20, durationMs: 10, inputTokens: 100, outputTokens: 20,
+      attributes: { "gen_ai.operation.name": "chat" },
+    }),
+    span("failed-2", {
+      parentId: "root", kind: "model", model: "ALPHA", name: "chat", status: "error",
+      startMs: 30, endMs: 50, durationMs: 20, inputTokens: 200, outputTokens: 30,
+      attributes: { "gen_ai.operation.name": "chat" },
+    }),
+    span("recovered", {
+      parentId: "root", kind: "model", model: "alpha", name: "chat", status: "ok",
+      startMs: 70, endMs: 100, durationMs: 30, inputTokens: 300, outputTokens: 40,
+      attributes: { "gen_ai.operation.name": "chat" },
+    }),
+  ];
+  const before = structuredClone(spans);
+  for (const item of spans) {
+    Object.freeze(item.attributes);
+    Object.freeze(item);
+  }
+  Object.freeze(spans);
+
+  const report = analyzeSpans(spans, { pricing: { models: { alpha: { inputPerMillion: 2, outputPerMillion: 8 } } } });
+  assert.deepEqual(spans, before, "analysis must not mutate caller-owned input");
+  assert.equal(report.schemaVersion, "1.1");
+  assert.equal(report.summary.recoveredRetries, 2);
+  assert.equal(report.recoveryLedger.length, 1);
+  const recovery = report.recoveryLedger[0];
+  assert.equal(recovery?.operationSignature, "model:alpha:chat");
+  assert.equal(recovery?.traceId, "trace-a");
+  assert.equal(recovery?.parentSpanId, "root");
+  assert.deepEqual(recovery?.failedAttempts.map((attempt) => attempt.spanId), ["failed-1", "failed-2"]);
+  assert.equal(recovery?.recoveredBy.spanId, "recovered");
+  assert.equal(recovery?.recoveredBy.status, "ok");
+  assert.equal(recovery?.failedDurationMs, 30);
+  assert.equal(recovery?.retryDelayMs, 20);
+  assert.equal(recovery?.recoveryLatencyMs, 80);
+  assert.equal(recovery?.failedInputTokens, 300);
+  assert.equal(recovery?.failedOutputTokens, 50);
+  assert.equal(recovery?.estimatedFailedCostUsd, 0.001);
+  assert.equal(recovery?.failedAttempts[0]?.estimatedCostUsd, 0.00036);
+  assert.equal(recovery?.recoveredBy.estimatedCostUsd, 0.00092);
+});
+
+test("Recovery Ledger excludes parallel siblings, name-only matches, and cross-context matches", () => {
+  const report = analyzeSpans([
+    span("root", { startMs: 1, endMs: 100, durationMs: 99 }),
+    span("parallel-error", { parentId: "root", kind: "tool", tool: "search", status: "error", startMs: 10, endMs: 50, durationMs: 40 }),
+    span("parallel-ok", { parentId: "root", kind: "tool", tool: "search", status: "ok", startMs: 20, endMs: 60, durationMs: 40 }),
+    span("simultaneous-error", { parentId: "root", kind: "tool", tool: "clock", status: "error", startMs: 60, endMs: 60, durationMs: 0 }),
+    span("simultaneous-ok", { parentId: "root", kind: "tool", tool: "clock", status: "ok", startMs: 60, endMs: 60, durationMs: 0 }),
+    span("name-error", { parentId: "root", name: "same-name", status: "error", startMs: 61, endMs: 65, durationMs: 4 }),
+    span("name-ok", { parentId: "root", name: "same-name", status: "ok", startMs: 66, endMs: 70, durationMs: 4 }),
+    span("parent-a-error", { parentId: "root", kind: "tool", tool: "weather", status: "error", startMs: 71, endMs: 75, durationMs: 4 }),
+    span("parent-b-ok", { parentId: "different-root", kind: "tool", tool: "weather", status: "ok", startMs: 76, endMs: 80, durationMs: 4 }),
+    span("trace-a-error", { traceId: "trace-a", parentId: "shared-parent", kind: "tool", tool: "maps", status: "error", startMs: 81, endMs: 85, durationMs: 4 }),
+    span("trace-b-ok", { traceId: "trace-b", parentId: "shared-parent", kind: "tool", tool: "maps", status: "ok", startMs: 86, endMs: 90, durationMs: 4 }),
+  ]);
+  assert.equal(report.recoveryLedger.length, 0);
+  assert.equal(report.summary.recoveredRetries, 0);
+  assert.ok(report.warnings.some((warning) => warning.includes("overlapping or simultaneous sibling spans")));
+});
+
+test("Recovery Ledger omits unverifiable timing and unknown token or cost evidence", () => {
+  const unknownTiming = analyzeSpans([
+    span("root"),
+    span("failed", { parentId: "root", kind: "tool", tool: "weather", status: "error", startMs: 0, endMs: 0, durationMs: 0 }),
+    span("next", { parentId: "root", kind: "tool", tool: "weather", status: "unset", startMs: 10, endMs: 20, durationMs: 10 }),
+  ]);
+  assert.equal(unknownTiming.recoveryLedger.length, 0);
+  assert.ok(unknownTiming.warnings.some((warning) => warning.includes("without usable timing evidence")));
+
+  const unpriced = analyzeSpans([
+    span("root", { startMs: 1 }),
+    span("failed", { parentId: "root", kind: "tool", tool: "weather", status: "error", startMs: 10, endMs: 20, durationMs: 10 }),
+    span("next", { parentId: "root", kind: "tool", tool: "weather", status: "unset", startMs: 25, endMs: 35, durationMs: 10 }),
+  ]);
+  const entry = unpriced.recoveryLedger[0];
+  assert.equal(entry?.recoveredBy.status, "unset");
+  assert.equal(entry?.failedInputTokens, undefined);
+  assert.equal(entry?.estimatedFailedCostUsd, undefined);
+  assert.equal(entry?.failedAttempts[0]?.estimatedCostUsd, undefined);
+
+  const partialTokens = analyzeSpans([
+    span("root", { startMs: 1 }),
+    span("failed-with-tokens", { parentId: "root", kind: "model", model: "alpha", name: "chat", status: "error", startMs: 10, endMs: 20, durationMs: 10, inputTokens: 12 }),
+    span("failed-without-tokens", { parentId: "root", kind: "model", model: "alpha", name: "chat", status: "error", startMs: 21, endMs: 30, durationMs: 9 }),
+    span("next", { parentId: "root", kind: "model", model: "alpha", name: "chat", status: "ok", startMs: 31, endMs: 40, durationMs: 9 }),
+  ]);
+  assert.equal(partialTokens.recoveryLedger[0]?.failedAttempts[0]?.inputTokens, 12);
+  assert.equal(partialTokens.recoveryLedger[0]?.failedAttempts[1]?.inputTokens, undefined);
+  assert.equal(partialTokens.recoveryLedger[0]?.failedInputTokens, undefined, "partial token evidence must not be presented as a total");
+});
+
 test("detects recurrence along a parent path", () => {
   const report = analyzeSpans([
     span("outer", { kind: "agent", name: "planner" }),
@@ -83,6 +181,27 @@ test("produces deterministic reports for identical traces", () => {
   const second = analyzeSpans([...spans].reverse(), { title: "Stable" });
   assert.deepEqual(first, second);
   assert.equal(first.generatedAt, "1970-01-01T00:00:00.000Z");
+});
+
+test("sorts and redacts Recovery Ledger evidence deterministically", () => {
+  const spans = [
+    span("alice@example.test", {
+      traceId: "Bearer abcdefghijklmnop", parentId: "parent@example.test", kind: "tool", tool: "sk-abcdefghijklmnop",
+      status: "error", startMs: 10, endMs: 20, durationMs: 10,
+    }),
+    span("safe-next", {
+      traceId: "Bearer abcdefghijklmnop", parentId: "parent@example.test", kind: "tool", tool: "sk-abcdefghijklmnop",
+      status: "ok", startMs: 25, endMs: 35, durationMs: 10,
+    }),
+  ];
+  const first = analyzeSpans(spans);
+  const second = analyzeSpans([...spans].reverse());
+  assert.deepEqual(first, second);
+  assert.equal(first.recoveryLedger.length, 1);
+  assert.ok(!JSON.stringify(first.recoveryLedger).includes("alice@example.test"));
+  assert.ok(!JSON.stringify(first.recoveryLedger).includes("abcdefghijklmnop"));
+  assert.equal(first.recoveryLedger[0]?.failedAttempts[0]?.spanId, first.spans[0]?.id);
+  assert.equal(first.recoveryLedger[0]?.traceId, first.traces[0]?.id);
 });
 
 test("warns about missing parent and timing data", () => {
@@ -150,4 +269,5 @@ test("groups generic session IDs but aliases them whenever default redaction is 
 test("rejects invalid normalized numbers before report generation", () => {
   assert.throws(() => analyzeSpans([span("bad", { durationMs: Number.POSITIVE_INFINITY })]), /non-finite durationMs/u);
   assert.throws(() => analyzeSpans([span("bad", { inputTokens: Number.MAX_SAFE_INTEGER + 1 })]), /invalid inputTokens/u);
+  assert.throws(() => analyzeSpans([span("bad", { status: "maybe" as "ok" })]), /invalid status/u);
 });

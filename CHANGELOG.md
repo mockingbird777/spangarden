@@ -7,6 +7,12 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 ### Added
 
 - Normalize `durationNs`/`duration_ns` nanosecond duration fields to milliseconds, after the existing millisecond fields.
+- Add a high-confidence Recovery Ledger across terminal, Markdown, JSON, and HTML reports. Entries require the same trace, explicit parent, stable tool/model operation signature, serial timing, and an error sequence followed by a non-error span.
+- Include auditable failed-attempt and `recoveredBy` span IDs, failed duration, final retry delay, recovery latency, available token evidence, and estimates derived only from a supplied local pricing file.
+
+### Changed
+
+- Extend the machine-readable report schema to `1.1` with `summary.recoveredRetries` and `recoveryLedger`; unavailable Recovery Ledger token and cost evidence remains explicitly unknown or omitted.
 
 ## [0.1.1] - 2026-07-20
 

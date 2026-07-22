@@ -51,6 +51,29 @@ export interface LoopFinding {
   reason: "recursive path" | "repeated siblings";
 }
 
+export interface RecoverySpanEvidence {
+  spanId: string;
+  status: SpanStatus;
+  durationMs: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  estimatedCostUsd?: number;
+}
+
+export interface RecoveryLedgerEntry {
+  traceId: string;
+  parentSpanId: string;
+  operationSignature: string;
+  failedAttempts: RecoverySpanEvidence[];
+  recoveredBy: RecoverySpanEvidence;
+  failedDurationMs: number;
+  retryDelayMs: number;
+  recoveryLatencyMs: number;
+  failedInputTokens?: number;
+  failedOutputTokens?: number;
+  estimatedFailedCostUsd?: number;
+}
+
 export interface PricingRate {
   inputPerMillion: number;
   outputPerMillion: number;
@@ -74,6 +97,7 @@ export interface ReportSummary {
   spans: number;
   errors: number;
   retries: number;
+  recoveredRetries: number;
   loops: number;
   totalDurationMs: number;
   p50SpanMs: number;
@@ -83,7 +107,7 @@ export interface ReportSummary {
 }
 
 export interface AnalysisReport {
-  schemaVersion: "1.0";
+  schemaVersion: "1.1";
   title: string;
   generatedAt: string;
   source: string;
@@ -93,6 +117,7 @@ export interface AnalysisReport {
   traces: TraceSummary[];
   spans: NormalizedSpan[];
   usage: UsageRow[];
+  recoveryLedger: RecoveryLedgerEntry[];
   loops: LoopFinding[];
   warnings: string[];
 }

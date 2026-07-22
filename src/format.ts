@@ -1,4 +1,4 @@
-import type { AnalysisReport, NormalizedSpan, OutputFormat, UsageRow } from "./types.js";
+import type { AnalysisReport, NormalizedSpan, OutputFormat, RecoverySpanEvidence, UsageRow } from "./types.js";
 
 function duration(value: number): string {
   if (value >= 60_000) return `${(value / 60_000).toFixed(1)}m`;
@@ -16,13 +16,23 @@ function singleLine(value: string): string {
     .replace(/\s{2,}/gu, " ");
 }
 
+function recoveryTokens(attempt: RecoverySpanEvidence): string {
+  if (attempt.inputTokens === undefined && attempt.outputTokens === undefined) return "unknown";
+  return `${(attempt.inputTokens ?? 0).toLocaleString("en-US")} in / ${(attempt.outputTokens ?? 0).toLocaleString("en-US")} out`;
+}
+
+function recoveryCost(attempt: RecoverySpanEvidence): string {
+  return attempt.estimatedCostUsd === undefined ? "unknown" : dollars(attempt.estimatedCostUsd);
+}
+
 function terminal(report: AnalysisReport): string {
   const summary = report.summary;
   const lines = [
     "",
     `  SPANGARDEN  ${singleLine(report.title)}`,
     "  " + "─".repeat(62),
-    `  ${summary.traces} traces   ${summary.spans} spans   ${summary.errors} errors   ${summary.retries} retry candidates`,
+    `  ${summary.traces} traces   ${summary.spans} spans   ${summary.errors} errors   ${summary.recoveredRetries} recovered retries`,
+    `  ${summary.retries} retry candidates   ${summary.loops} loop signals`,
     `  ${duration(summary.totalDurationMs)} wall time   p50 ${duration(summary.p50SpanMs)}   p95 ${duration(summary.p95SpanMs)}`,
     `  ${summary.inputTokens.toLocaleString("en-US")} in / ${summary.outputTokens.toLocaleString("en-US")} out tokens`,
   ];
@@ -32,6 +42,15 @@ function terminal(report: AnalysisReport): string {
   for (const trace of report.traces) {
     const names = trace.criticalPath.map((id) => singleLine(byId.get(id)?.name ?? id)).join("  →  ");
     lines.push(`  ${singleLine(trace.id)}  ${duration(trace.criticalPathMs)}  ${names}`);
+  }
+  lines.push("", "  RECOVERY LEDGER");
+  if (report.recoveryLedger.length === 0) lines.push("  No high-confidence recovered retries identified.");
+  for (const entry of report.recoveryLedger) {
+    lines.push(`  ${singleLine(entry.operationSignature)}  trace ${singleLine(entry.traceId)}  parent ${singleLine(entry.parentSpanId)}`);
+    for (const attempt of entry.failedAttempts) {
+      lines.push(`    failed ${singleLine(attempt.spanId)}  ${duration(attempt.durationMs)}  tokens ${recoveryTokens(attempt)}  cost ${recoveryCost(attempt)}`);
+    }
+    lines.push(`    recovered by ${singleLine(entry.recoveredBy.spanId)} (${entry.recoveredBy.status}, ${duration(entry.recoveredBy.durationMs)})  tokens ${recoveryTokens(entry.recoveredBy)}  cost ${recoveryCost(entry.recoveredBy)}  final delay ${duration(entry.retryDelayMs)}  recovery latency ${duration(entry.recoveryLatencyMs)}`);
   }
   lines.push("", "  USAGE");
   if (report.usage.length === 0) lines.push("  No model or tool usage identified.");
@@ -87,13 +106,27 @@ function markdown(report: AnalysisReport): string {
     "## Overview",
     "",
     `- **${s.traces}** traces and **${s.spans}** spans`,
-    `- **${s.errors}** errors, **${s.retries}** retry candidates, **${s.loops}** loop signals`,
+    `- **${s.errors}** errors, **${s.recoveredRetries}** recovered retries, **${s.retries}** retry candidates, **${s.loops}** loop signals`,
     `- **${duration(s.totalDurationMs)}** total wall time; p50 **${duration(s.p50SpanMs)}**, p95 **${duration(s.p95SpanMs)}**`,
     `- **${s.inputTokens.toLocaleString("en-US")}** input and **${s.outputTokens.toLocaleString("en-US")}** output tokens`,
   ];
   if (report.cost !== undefined) lines.push(`- **${dollars(report.cost.estimatedUsd)}** estimated from the supplied local pricing file`);
   lines.push("", "## Critical paths", "");
   for (const trace of report.traces) lines.push(`- ${markdownCode(trace.id)} · ${duration(trace.criticalPathMs)} · ${trace.criticalPath.map((id) => markdownText(byId.get(id)?.name ?? id)).join(" → ")}`);
+  lines.push("", "## Recovery Ledger", "", "Only serial sibling attempts with the same trace, parent, and stable tool/model operation signature are included.", "", "| Operation | Trace / parent | Failed attempts | Recovered by | Failed duration | Final retry delay | Recovery latency | Failed tokens | Est. failed cost |", "|---|---|---|---|---:|---:|---:|---:|---:|");
+  if (report.recoveryLedger.length === 0) {
+    lines.push("| — | — | No high-confidence recovered retries identified | — | — | — | — | unknown | unknown |");
+  } else {
+    for (const entry of report.recoveryLedger) {
+      const failed = entry.failedAttempts.map((attempt) => `${attempt.spanId} (${duration(attempt.durationMs)})`).join(" → ");
+      const tokenText = entry.failedInputTokens === undefined && entry.failedOutputTokens === undefined
+        ? "unknown"
+        : `${(entry.failedInputTokens ?? 0).toLocaleString("en-US")} in / ${(entry.failedOutputTokens ?? 0).toLocaleString("en-US")} out`;
+      const cost = entry.estimatedFailedCostUsd === undefined ? "unknown" : dollars(entry.estimatedFailedCostUsd);
+      const recovered = `${entry.recoveredBy.spanId} (${entry.recoveredBy.status}; ${recoveryTokens(entry.recoveredBy)}; ${recoveryCost(entry.recoveredBy)})`;
+      lines.push(`| ${markdownCell(entry.operationSignature)} | ${markdownCell(`${entry.traceId} / ${entry.parentSpanId}`)} | ${markdownCell(failed)} | ${markdownCell(recovered)} | ${duration(entry.failedDurationMs)} | ${duration(entry.retryDelayMs)} | ${duration(entry.recoveryLatencyMs)} | ${markdownCell(tokenText)} | ${cost} |`);
+    }
+  }
   lines.push("", "## Model and tool usage", "", "| Type | Name | Calls | Errors | Duration | Input tokens | Output tokens | Est. cost |", "|---|---|---:|---:|---:|---:|---:|---:|");
   if (report.usage.length === 0) lines.push("| — | No usage identified | 0 | 0 | 0ms | 0 | 0 | — |");
   else lines.push(...report.usage.map(markdownUsage));
@@ -114,7 +147,7 @@ function html(report: AnalysisReport): string {
   const encoded = Buffer.from(JSON.stringify(report), "utf8").toString("base64");
   const title = escapeHtml(singleLine(report.title));
   const pageTitle = `${title} · SpanGarden`;
-  const description = "Explore AI-agent critical paths, retries, errors, token usage, and estimated cost in a local-first SpanGarden trace report.";
+  const description = "Explore AI-agent critical paths, high-confidence recovered retries, token usage, and opt-in cost evidence in a local-first SpanGarden report.";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -139,13 +172,14 @@ function html(report: AnalysisReport): string {
   <main class="shell">
     <nav class="topbar"><div class="eyebrow"><span class="seed"></span> SpanGarden · local agent observability</div><a class="repo-link" href="https://github.com/mockingbird777/spangarden">View on GitHub ↗</a></nav>
     <h1>${title}</h1>
-    <p class="subtitle">Follow the critical path, spot retry loops, and understand model and tool behavior—without sending a trace to the cloud.</p>
+    <p class="subtitle">Follow the critical path, audit recovered retry cost, and understand model and tool behavior—without sending a trace to the cloud.</p>
     <div class="meta" id="meta"></div>
     <section class="cards" id="cards"></section>
     <section class="panel">
       <div class="panel-head"><h2>Trace explorer</h2><div class="controls"><input id="search" type="search" placeholder="Filter spans…" autocomplete="off"><select id="kind"><option value="">All kinds</option><option>agent</option><option>model</option><option>tool</option><option>retrieval</option><option>other</option></select></div></div>
       <div id="traces"></div>
     </section>
+    <section class="panel"><div class="panel-head"><h2>Recovery Ledger</h2><span class="note">Serial, same-parent tool/model attempts only; missing evidence stays unknown</span></div><div style="overflow:auto"><table><thead><tr><th>Operation</th><th>Failed attempts</th><th>Recovered by</th><th class="num hide-mobile">Failed time</th><th class="num hide-mobile">Final delay</th><th class="num">Recovery latency</th><th class="num hide-mobile">Failed tokens</th><th class="num">Est. failed cost</th></tr></thead><tbody id="recovery-ledger"></tbody></table></div></section>
     <section class="panel"><div class="panel-head"><h2>Model &amp; tool usage</h2><span class="note">Cost appears only when local pricing was supplied</span></div><div style="overflow:auto"><table><thead><tr><th>Type</th><th>Name</th><th class="num">Calls</th><th class="num">Errors</th><th class="num hide-mobile">Duration</th><th class="num hide-mobile">Tokens</th><th class="num">Est. cost</th></tr></thead><tbody id="usage"></tbody></table></div></section>
     <section class="panel" id="loop-panel"><div class="panel-head"><h2>Loop signals</h2><span class="note">Heuristics are evidence, not a verdict</span></div><div class="loops" id="loops"></div></section>
     <footer class="footer"><span><strong>SpanGarden</strong> · offline, deterministic, dependency-light</span><span><a href="https://github.com/mockingbird777/spangarden">Star on GitHub ↗</a> · <span id="footer-meta"></span></span></footer>
@@ -159,13 +193,15 @@ function html(report: AnalysisReport): string {
   function dur(ms){return ms>=60000?(ms/60000).toFixed(1)+"m":ms>=1000?(ms/1000).toFixed(2)+"s":Math.round(ms)+"ms"}
   function money(v){return v<.01?"$"+v.toFixed(6):"$"+v.toFixed(4)}
   function chip(text){document.getElementById("meta").append(node("span","chip",text))}
-  chip(report.summary.traces+" traces");chip(report.redacted?"redaction on":"redaction OFF");chip("source · "+report.source);chip("schema "+report.schemaVersion);
-  const metrics=[["Spans",report.summary.spans,"#82f6b3"],["Errors",report.summary.errors,"#ff7890"],["Retry hints",report.summary.retries,"#ffc66d"],["Wall time",dur(report.summary.totalDurationMs),"#72d8ee"],["Tokens",(report.summary.inputTokens+report.summary.outputTokens).toLocaleString(),"#cbf36b"],[report.cost?"Est. cost":"p95 span",report.cost?money(report.cost.estimatedUsd):dur(report.summary.p95SpanMs),"#b89aff"]];
+  const recoveryLedger=report.recoveryLedger||[];const recoveredRetries=report.summary.recoveredRetries===undefined?recoveryLedger.reduce(function(n,e){return n+e.failedAttempts.length},0):report.summary.recoveredRetries;
+  chip(report.summary.traces+" traces");chip(report.summary.retries+" retry hints");chip(report.redacted?"redaction on":"redaction OFF");chip("source · "+report.source);chip("schema "+report.schemaVersion);
+  const metrics=[["Spans",report.summary.spans,"#82f6b3"],["Errors",report.summary.errors,"#ff7890"],["Recovered retries",recoveredRetries,"#ffc66d"],["Wall time",dur(report.summary.totalDurationMs),"#72d8ee"],["Tokens",(report.summary.inputTokens+report.summary.outputTokens).toLocaleString(),"#cbf36b"],[report.cost?"Est. cost":"p95 span",report.cost?money(report.cost.estimatedUsd):dur(report.summary.p95SpanMs),"#b89aff"]];
   metrics.forEach(function(m){const c=node("div","card");c.style.setProperty("--accent",m[2]);c.append(node("div","label",m[0]),node("div","value",m[1]));document.getElementById("cards").append(c)});
   const critical=new Set(report.traces.flatMap(function(t){return t.criticalPath}));
   function depth(span){let d=0,p=span.parentId,seen=new Set();while(p&&byId.has(p)&&!seen.has(p)&&d<12){seen.add(p);d++;p=byId.get(p).parentId}return d}
   function renderTraces(){const host=document.getElementById("traces");host.replaceChildren();const query=document.getElementById("search").value.toLowerCase();const selected=document.getElementById("kind").value;let shown=0;report.traces.forEach(function(trace){const spans=trace.spanIds.map(function(id){return byId.get(id)}).filter(Boolean).filter(function(s){return(!selected||s.kind===selected)&&(!query||(s.name+" "+s.model+" "+s.tool+" "+s.id).toLowerCase().includes(query))});if(!spans.length)return;shown+=spans.length;const section=node("section","trace");const head=node("div","trace-title");head.append(node("span","trace-id",trace.id),node("span","note",spans.length+" spans · critical "+dur(trace.criticalPathMs)));section.append(head);spans.forEach(function(s){const row=node("div","span"+(critical.has(s.id)?" critical":""));row.style.setProperty("--kind",kindColor[s.kind]||kindColor.other);const name=node("div","span-name");name.style.paddingLeft=Math.min(depth(s),8)*14+"px";name.append(node("span","dot"));const text=node("strong","",s.name);if(s.status==="error")text.classList.add("bad");name.append(text);const k=node("span","kind",s.kind);const track=node("div","track");const bar=node("div","bar");const width=trace.durationMs?Math.max(1,Math.min(100,s.durationMs/trace.durationMs*100)):1;bar.style.width=width+"%";track.append(bar);row.append(name,k,track,node("span","time",dur(s.durationMs)));section.append(row)});host.append(section)});if(!shown)host.append(node("div","empty","No spans match this filter."))}
   document.getElementById("search").addEventListener("input",renderTraces);document.getElementById("kind").addEventListener("change",renderTraces);renderTraces();
+  const recoveryHost=document.getElementById("recovery-ledger");recoveryLedger.forEach(function(e){const tr=node("tr");const failed=e.failedAttempts.map(function(a){return a.spanId+" ("+dur(a.durationMs)+")"}).join(" → ");const recoveredTokens=e.recoveredBy.inputTokens===undefined&&e.recoveredBy.outputTokens===undefined?"unknown":(e.recoveredBy.inputTokens||0).toLocaleString()+" in / "+(e.recoveredBy.outputTokens||0).toLocaleString()+" out";const recovered=e.recoveredBy.spanId+" ("+e.recoveredBy.status+"; "+recoveredTokens+"; "+(e.recoveredBy.estimatedCostUsd===undefined?"unknown":money(e.recoveredBy.estimatedCostUsd))+")";const tokens=e.failedInputTokens===undefined&&e.failedOutputTokens===undefined?"unknown":(e.failedInputTokens||0).toLocaleString()+" in / "+(e.failedOutputTokens||0).toLocaleString()+" out";tr.append(node("td","",e.operationSignature),node("td","",failed),node("td","",recovered),node("td","num hide-mobile",dur(e.failedDurationMs)),node("td","num hide-mobile",dur(e.retryDelayMs)),node("td","num",dur(e.recoveryLatencyMs)),node("td","num hide-mobile",tokens),node("td","num",e.estimatedFailedCostUsd===undefined?"unknown":money(e.estimatedFailedCostUsd)));recoveryHost.append(tr)});if(!recoveryLedger.length){const tr=node("tr");const td=node("td","empty","No high-confidence recovered retries identified.");td.colSpan=8;tr.append(td);recoveryHost.append(tr)}
   const usage=document.getElementById("usage");report.usage.forEach(function(u){const tr=node("tr");const type=node("td");type.append(node("span","badge",u.type));tr.append(type,node("td","",u.name),node("td","num",u.calls),node("td","num"+(u.errors?" bad":""),u.errors),node("td","num hide-mobile",dur(u.durationMs)),node("td","num hide-mobile",(u.inputTokens+u.outputTokens).toLocaleString()),node("td","num",u.estimatedCostUsd===undefined?"—":money(u.estimatedCostUsd)));usage.append(tr)});if(!report.usage.length){const tr=node("tr");const td=node("td","empty","No model or tool usage identified.");td.colSpan=7;tr.append(td);usage.append(tr)}
   const loops=document.getElementById("loops");if(!report.loops.length){document.getElementById("loop-panel").hidden=true}else{report.loops.forEach(function(l){const item=node("div","loop");const code=node("code","",l.signature);item.append(code,node("span","note"," · "+l.reason+" · "+l.spanIds.join(" → ")));loops.append(item)})}
   document.getElementById("footer-meta").textContent="trace time · "+report.generatedAt.slice(0,10);

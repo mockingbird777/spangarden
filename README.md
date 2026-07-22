@@ -4,7 +4,7 @@
 
 ### Grow raw agent traces into answers you can act on.
 
-**A local-first CLI for critical paths, retry loops, model/tool usage, tokens, errors, latency, and opt-in cost estimates.**
+**A local-first CLI for critical paths, a high-confidence Recovery Ledger, retry loops, model/tool usage, tokens, latency, and opt-in cost estimates.**
 
 [![CI](https://github.com/mockingbird777/spangarden/actions/workflows/ci.yml/badge.svg)](https://github.com/mockingbird777/spangarden/actions/workflows/ci.yml)
 [![Pages](https://github.com/mockingbird777/spangarden/actions/workflows/pages.yml/badge.svg)](https://mockingbird777.github.io/spangarden/)
@@ -20,18 +20,27 @@
 
 ![SpanGarden — turn agent traces into answers](assets/social-preview.svg)
 
-**SpanGarden answers the questions raw traces leave open: where did the run stall, what retried, which model or tool dominated, and what can you safely share?**
+**SpanGarden answers the questions raw traces leave open: where did the run stall, which failed attempts were verifiably recovered, what did that recovery consume, and what can you safely share?**
 
 Agent traces are rich and awkward: nested spans, vendor-shaped attributes, retries that look like normal calls, and token numbers without context. SpanGarden turns those exports into one reproducible report on your machine—no collector, database, Docker image, account, or cloud upload.
 
 ```text
   SPANGARDEN  SpanGarden agent trace report
   ──────────────────────────────────────────────────────────────
-  1 traces   6 spans   2 errors   2 retry candidates
+  1 traces   6 spans   2 errors   2 recovered retries
+  2 retry candidates   1 loop signals
   2.85s wall time   p50 280ms   p95 2.85s
   3,420 in / 1,196 out tokens
+
   CRITICAL PATHS
   garden-demo-01  3.93s  agent.plan_trip → chat final answer
+
+  RECOVERY LEDGER
+  tool:weather:execute_tool  trace garden-demo-01  parent root
+    failed weather-1  190ms  tokens unknown  cost unknown
+    failed weather-2  250ms  tokens unknown  cost unknown
+    recovered by weather-3 (ok, 280ms)  tokens unknown  cost unknown
+      final delay 80ms  recovery latency 680ms
 
   USAGE
   model  orchid-2                   1 calls     1.08s  0 err
@@ -47,6 +56,7 @@ Agent traces are rich and awkward: nested spans, vendor-shaped attributes, retri
 | Question | Signal |
 |---|---|
 | Where did the run spend time? | Per-trace trees, wall time, p50/p95, and longest root-to-leaf critical path |
+| Which failures actually recovered? | A conservative Recovery Ledger that requires matching trace, parent, operation identity, and non-overlapping chronology |
 | Is the agent stuck? | Recursive-path and repeated-sibling loop signals plus retry candidates |
 | Which tools and models dominate? | Deterministic call, error, latency, and token rollups |
 | What might this run cost? | Estimates from **your local pricing JSON only**—never stale bundled prices |
@@ -91,14 +101,14 @@ spangarden run.json --output report.html          # format inferred from the ext
 cat run.jsonl | spangarden - --format json
 ```
 
-The HTML report is one portable file with search, kind filters, critical-path highlighting, usage tables, and loop evidence. It loads no remote assets.
+The HTML report is one portable file with search, kind filters, critical-path highlighting, a Recovery Ledger, usage tables, and loop evidence. It loads no remote assets.
 
 ## Where it fits
 
 | Approach | Best at | What SpanGarden adds |
 |---|---|---|
 | Hosted observability backend | Always-on ingestion, retention, alerting, and team dashboards | A local investigation path with no service, account, or upload |
-| Raw OTel viewer | Inspecting individual spans and attributes | Agent-aware critical paths, retries/loops, model/tool rollups, token totals, and opt-in cost arithmetic |
+| Raw OTel viewer | Inspecting individual spans and attributes | Agent-aware critical paths, auditable recovered retries, model/tool rollups, token totals, and opt-in cost arithmetic |
 | One-off scripts | Answering one question for one trace shape | Tolerant adapters, deterministic reports, default redaction, and four stable output formats |
 | SpanGarden | Fast local diagnosis and shareable artifacts | Zero runtime dependencies and one self-contained interactive HTML report |
 
@@ -109,14 +119,71 @@ SpanGarden is an investigation tool, not a collector, long-term trace store, bil
 - Parent/child span forests, including missing-parent and cyclic-input recovery
 - Longest duration-weighted root-to-leaf path per trace
 - Model and tool calls, errors, durations, input tokens, and output tokens
+- High-confidence recovered retry sequences with failed attempts, the non-failed span that recovered them, failed duration, final retry delay, and recovery latency
 - Repeated siblings as retry candidates; three or more as a loop signal
 - Repeated operations along an ancestor path as a recursive-loop signal
 - Trace wall time and p50/p95 span latency
 - Optional per-model cost estimates with priced/unpriced token accounting
 
+### Recovery Ledger confidence boundary
+
+The Recovery Ledger is deliberately stricter than the general retry heuristic. It records a recovery only when all of this evidence is present:
+
+1. Every attempt has the same `traceId` and an explicit, identical `parentSpanId`.
+2. Every attempt has a stable normalized signature: an explicit tool identity, or a model identity plus operation identity. A matching span name alone is never enough.
+3. All spans in that operation group are serial. If any sibling intervals overlap or share the same start time, the entire group is omitted instead of guessing which call retried which.
+4. One or more `error` spans are followed by a span not marked as an error. Its original `ok` or `unset` status remains visible; SpanGarden does not invent a success status.
+5. Usable timing exists for the whole group. Timing-free groups are omitted with a report note.
+
+The normalized `operationSignature` is `tool:<tool>[:<gen_ai.operation.name>]` for explicit tool spans and `model:<model>:<gen_ai.operation.name-or-span-name>` for explicit model spans. Its parts are trimmed, whitespace-normalized, and case-folded. Generic name-only spans do not get a Recovery Ledger signature.
+
+Each entry keeps the failed span IDs and the `recoveredBy` span ID so the conclusion can be checked against the raw trace. `failedDurationMs` is the sum of failed-attempt durations. `retryDelayMs` is the gap from the last failure ending to the recovery attempt starting. `recoveryLatencyMs` runs from the first failure ending until the recovery attempt ends.
+
+Token counts appear only when non-zero token evidence exists. Per-attempt and failed-work cost estimates appear only when a matching rate from the user-supplied local pricing file exists; terminal, Markdown, and HTML reports say `unknown`, while JSON omits unavailable optional fields. SpanGarden never backfills missing telemetry.
+
+A shortened priced JSON entry looks like this:
+
+```json
+{
+  "schemaVersion": "1.1",
+  "summary": { "recoveredRetries": 1 },
+  "recoveryLedger": [
+    {
+      "traceId": "trace-a",
+      "parentSpanId": "agent-run",
+      "operationSignature": "model:alpha:chat",
+      "failedAttempts": [
+        {
+          "spanId": "attempt-1",
+          "status": "error",
+          "durationMs": 240,
+          "inputTokens": 800,
+          "outputTokens": 20,
+          "estimatedCostUsd": 0.00176
+        }
+      ],
+      "recoveredBy": {
+        "spanId": "attempt-2",
+        "status": "ok",
+        "durationMs": 310,
+        "inputTokens": 800,
+        "outputTokens": 90,
+        "estimatedCostUsd": 0.00232
+      },
+      "failedDurationMs": 240,
+      "retryDelayMs": 75,
+      "recoveryLatencyMs": 385,
+      "failedInputTokens": 800,
+      "failedOutputTokens": 20,
+      "estimatedFailedCostUsd": 0.00176
+    }
+  ]
+}
+```
+
 Loop evidence is bounded to 1,000 findings and 100 span IDs per finding so adversarial repetition cannot multiply report size without limit; a report note appears when evidence is clipped.
 
-Loop and retry results are deliberately labeled **signals** and **candidates**. They guide an investigation; they do not pretend to know application intent.
+Loop and general retry results are deliberately labeled **signals** and **candidates**. Recovery Ledger entries have stronger structural and chronological evidence, but still describe telemetry—not application intent.
 
 ## Input adapters
 
@@ -175,7 +242,7 @@ SpanGarden does **not** ship or fetch model prices. Supply rates you have review
 spangarden trace.json --pricing pricing.json --format html -o report.html
 ```
 
-Exact model names are preferred, matching is case-insensitive, and `*` is an optional fallback. Unmatched tokens are reported as unpriced. Estimates are arithmetic aids, not billing records.
+Exact model names are preferred, matching is case-insensitive, and `*` is an optional fallback. Unmatched tokens are reported as unpriced in aggregate usage and remain `unknown` in Recovery Ledger cost fields. Estimates are arithmetic aids, not billing records.
 
 ## Privacy by default
 
@@ -210,7 +277,7 @@ spangarden <trace.json|trace.jsonl|trace.json.gz|-> [options]
     --demo            analyze a built-in synthetic OTel trace
 ```
 
-Machine-readable reports use schema version `1.0`. Results are sorted and the report timestamp is anchored to trace data, making repeated analysis byte-for-byte reproducible for the same inputs and options.
+Machine-readable reports use schema version `1.1`; the new `summary.recoveredRetries` and `recoveryLedger` fields extend the 1.0 report shape. Results are sorted and the report timestamp is anchored to trace data, making repeated analysis byte-for-byte reproducible for the same inputs and options.
 
 ## Development
 

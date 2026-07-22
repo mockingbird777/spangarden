@@ -7,6 +7,8 @@ import type {
   LoopFinding,
   NormalizedSpan,
   PricingFile,
+  RecoveryLedgerEntry,
+  RecoverySpanEvidence,
   TraceSummary,
   UsageRow,
 } from "./types.js";
@@ -61,6 +63,155 @@ function sumSafeIntegers(values: number[], label: string): number {
 
 function signature(span: NormalizedSpan): string {
   return `${span.kind}:${span.tool ?? span.model ?? span.name}`.toLowerCase();
+}
+
+function canonicalOperationPart(value: string): string | undefined {
+  const normalized = value.trim().replace(/\s+/gu, " ").toLowerCase();
+  return normalized.length === 0 ? undefined : normalized;
+}
+
+function stringAttribute(span: NormalizedSpan, key: string): string | undefined {
+  if (!Object.prototype.hasOwnProperty.call(span.attributes, key)) return undefined;
+  const value = span.attributes[key];
+  if (typeof value === "string") return canonicalOperationPart(value);
+  if (typeof value === "number" || typeof value === "boolean") return canonicalOperationPart(String(value));
+  return undefined;
+}
+
+/**
+ * Recovery matching intentionally excludes name-only spans. Tool identity and
+ * model + operation identity are the smallest stable signatures normalized by
+ * the adapter without relying on arguments, prompts, or other sensitive data.
+ */
+function stableOperationSignature(span: NormalizedSpan): string | undefined {
+  if (span.kind === "tool" && span.tool !== undefined) {
+    const tool = canonicalOperationPart(span.tool);
+    if (tool === undefined) return undefined;
+    const operation = stringAttribute(span, "gen_ai.operation.name");
+    return operation === undefined ? `tool:${tool}` : `tool:${tool}:${operation}`;
+  }
+  if (span.kind === "model" && span.model !== undefined) {
+    const model = canonicalOperationPart(span.model);
+    const operation = stringAttribute(span, "gen_ai.operation.name") ?? canonicalOperationPart(span.name);
+    if (model === undefined || operation === undefined) return undefined;
+    return `model:${model}:${operation}`;
+  }
+  return undefined;
+}
+
+function hasUsableRecoveryTiming(span: NormalizedSpan): boolean {
+  if (span.endMs < span.startMs) return false;
+  return span.startMs !== 0 || span.endMs !== 0 || span.durationMs !== 0;
+}
+
+function estimateSpanCost(span: NormalizedSpan, pricing?: PricingFile): number | undefined {
+  const tokens = addSafeInteger(span.inputTokens, span.outputTokens, `Token count for span ${span.id}`);
+  if (tokens === 0 || pricing === undefined || span.model === undefined) return undefined;
+  const rate = pricingRate(pricing, span.model);
+  if (rate === undefined) return undefined;
+  const cost = span.inputTokens * rate.inputPerMillion / 1_000_000 + span.outputTokens * rate.outputPerMillion / 1_000_000;
+  if (!Number.isFinite(cost)) throw new Error(`Recovery cost estimate overflow for model ${JSON.stringify(span.model)}`);
+  return round(cost, 8);
+}
+
+function recoveryEvidence(span: NormalizedSpan, pricing?: PricingFile): RecoverySpanEvidence {
+  const hasTokens = span.inputTokens > 0 || span.outputTokens > 0;
+  const estimatedCostUsd = estimateSpanCost(span, pricing);
+  return {
+    spanId: span.id,
+    status: span.status,
+    durationMs: span.durationMs,
+    ...(hasTokens ? { inputTokens: span.inputTokens, outputTokens: span.outputTokens } : {}),
+    ...(estimatedCostUsd === undefined ? {} : { estimatedCostUsd }),
+  };
+}
+
+interface RecoveryResult {
+  ledger: RecoveryLedgerEntry[];
+  skippedParallelGroups: number;
+  skippedTimingGroups: number;
+}
+
+function findRecoveryLedger(spans: NormalizedSpan[], pricing?: PricingFile): RecoveryResult {
+  const groups = new Map<string, { traceId: string; parentSpanId: string; operationSignature: string; spans: NormalizedSpan[] }>();
+  for (const span of spans) {
+    if (span.parentId === undefined || span.parentId.length === 0) continue;
+    const operationSignature = stableOperationSignature(span);
+    if (operationSignature === undefined) continue;
+    const key = JSON.stringify([span.traceId, span.parentId, operationSignature]);
+    const group = groups.get(key) ?? { traceId: span.traceId, parentSpanId: span.parentId, operationSignature, spans: [] };
+    group.spans.push(span);
+    groups.set(key, group);
+  }
+
+  const ledger: RecoveryLedgerEntry[] = [];
+  let skippedParallelGroups = 0;
+  let skippedTimingGroups = 0;
+  const orderedGroups = [...groups.values()].sort((a, b) =>
+    compareText(a.traceId, b.traceId) || compareText(a.parentSpanId, b.parentSpanId) || compareText(a.operationSignature, b.operationSignature));
+  for (const group of orderedGroups) {
+    if (group.spans.length < 2 || !group.spans.some((span) => span.status === "error")) continue;
+    const ordered = [...group.spans].sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs || compareText(a.id, b.id));
+    if (ordered.some((span) => !hasUsableRecoveryTiming(span))) {
+      skippedTimingGroups += 1;
+      continue;
+    }
+    let latestEnd = Number.NEGATIVE_INFINITY;
+    let previousStart: number | undefined;
+    let overlaps = false;
+    for (const span of ordered) {
+      if (span.startMs < latestEnd || (previousStart !== undefined && span.startMs === previousStart)) {
+        overlaps = true;
+        break;
+      }
+      latestEnd = Math.max(latestEnd, span.endMs);
+      previousStart = span.startMs;
+    }
+    if (overlaps) {
+      skippedParallelGroups += 1;
+      continue;
+    }
+
+    let failed: NormalizedSpan[] = [];
+    for (const span of ordered) {
+      if (span.status === "error") {
+        failed.push(span);
+        continue;
+      }
+      if (failed.length === 0) continue;
+      const attempts = failed.map((attempt) => recoveryEvidence(attempt, pricing));
+      const recoveredBy = recoveryEvidence(span, pricing);
+      const firstFailed = failed[0] as NormalizedSpan;
+      const lastFailed = failed[failed.length - 1] as NormalizedSpan;
+      const failedDurationMs = round(failed.reduce((total, attempt) => total + attempt.durationMs, 0));
+      const allFailedAttemptsHaveTokens = attempts.every((attempt) => attempt.inputTokens !== undefined || attempt.outputTokens !== undefined);
+      const failedInputTokens = allFailedAttemptsHaveTokens
+        ? sumSafeIntegers(attempts.map((attempt) => attempt.inputTokens ?? 0), "Recovery Ledger input token count")
+        : undefined;
+      const failedOutputTokens = allFailedAttemptsHaveTokens
+        ? sumSafeIntegers(attempts.map((attempt) => attempt.outputTokens ?? 0), "Recovery Ledger output token count")
+        : undefined;
+      const allFailedAttemptsPriced = attempts.every((attempt) => attempt.estimatedCostUsd !== undefined);
+      const estimatedFailedCostUsd = allFailedAttemptsPriced
+        ? round(attempts.reduce((total, attempt) => total + (attempt.estimatedCostUsd as number), 0), 8)
+        : undefined;
+      ledger.push({
+        traceId: group.traceId,
+        parentSpanId: group.parentSpanId,
+        operationSignature: group.operationSignature,
+        failedAttempts: attempts,
+        recoveredBy,
+        failedDurationMs,
+        retryDelayMs: round(Math.max(0, span.startMs - lastFailed.endMs)),
+        recoveryLatencyMs: round(Math.max(0, span.endMs - firstFailed.endMs)),
+        ...(failedInputTokens === undefined ? {} : { failedInputTokens }),
+        ...(failedOutputTokens === undefined ? {} : { failedOutputTokens }),
+        ...(estimatedFailedCostUsd === undefined ? {} : { estimatedFailedCostUsd }),
+      });
+      failed = [];
+    }
+  }
+  return { ledger, skippedParallelGroups, skippedTimingGroups };
 }
 
 interface PathResult {
@@ -340,6 +491,7 @@ function validateSpans(spans: NormalizedSpan[]): void {
     if (ids.has(span.id)) throw new Error(`Duplicate normalized span id: ${span.id}`);
     ids.add(span.id);
     if (typeof span.traceId !== "string" || span.traceId.length === 0) throw new Error(`Span ${span.id} must have a non-empty traceId`);
+    if (!(span.status === "ok" || span.status === "error" || span.status === "unset")) throw new Error(`Span ${span.id} has an invalid status`);
     for (const [name, value] of [["startMs", span.startMs], ["endMs", span.endMs], ["durationMs", span.durationMs]] as const) {
       if (!Number.isFinite(value)) throw new Error(`Span ${span.id} has a non-finite ${name}`);
     }
@@ -363,6 +515,7 @@ export function analyzeSpans(inputSpans: NormalizedSpan[], options: AnalyzeOptio
   const traces = [...traceGroups.entries()].sort(([a], [b]) => compareText(a, b)).map(([id, traceSpans]) => buildTrace(id, traceSpans));
   const loopResult = findLoops(spans);
   const usageResult = usageRows(spans, options.pricing);
+  const recoveryResult = findRecoveryLedger(spans, options.pricing);
   const knownIds = new Map<string, Set<string>>();
   for (const span of spans) {
     const ids = knownIds.get(span.traceId) ?? new Set<string>();
@@ -376,6 +529,8 @@ export function analyzeSpans(inputSpans: NormalizedSpan[], options: AnalyzeOptio
   if (zeroTiming > 0) warnings.push(`${zeroTiming} span(s) have no usable timing information.`);
   if (usageResult.cost !== undefined && usageResult.cost.unpricedTokens > 0) warnings.push(`${usageResult.cost.unpricedTokens} model token(s) remain unpriced because no local rate matched.`);
   if (loopResult.truncated) warnings.push(`Loop evidence was limited to ${MAX_LOOP_FINDINGS} findings and ${MAX_LOOP_EVIDENCE_IDS} span IDs per finding.`);
+  if (recoveryResult.skippedParallelGroups > 0) warnings.push(`Recovery Ledger omitted ${recoveryResult.skippedParallelGroups} operation group(s) with overlapping or simultaneous sibling spans.`);
+  if (recoveryResult.skippedTimingGroups > 0) warnings.push(`Recovery Ledger omitted ${recoveryResult.skippedTimingGroups} operation group(s) without usable timing evidence.`);
   const redact = options.redact ?? true;
   const sensitiveTraceIds = new Set(spans.filter((span) => (span as InternalSpan)[SENSITIVE_TRACE_ID] === true).map((span) => span.traceId));
   const outputSpans = redact ? spans.map(redactSpan) : spans;
@@ -393,8 +548,22 @@ export function analyzeSpans(inputSpans: NormalizedSpan[], options: AnalyzeOptio
     signature: redactString(loop.signature),
     spanIds: loop.spanIds.map((id) => redactIdentifier(id, "span")),
   })) : loopResult.loops;
+  const outputRecoveryLedger = redact ? recoveryResult.ledger.map((entry) => ({
+    ...entry,
+    traceId: redactIdentifier(entry.traceId, "trace", sensitiveTraceIds.has(entry.traceId)),
+    parentSpanId: redactIdentifier(entry.parentSpanId, "span"),
+    operationSignature: redactString(entry.operationSignature),
+    failedAttempts: entry.failedAttempts.map((attempt) => ({
+      ...attempt,
+      spanId: redactIdentifier(attempt.spanId, "span"),
+    })),
+    recoveredBy: {
+      ...entry.recoveredBy,
+      spanId: redactIdentifier(entry.recoveredBy.spanId, "span"),
+    },
+  })) : recoveryResult.ledger;
   const report: AnalysisReport = {
-    schemaVersion: "1.0",
+    schemaVersion: "1.1",
     title: redact ? redactString(options.title ?? "SpanGarden agent trace report") : options.title ?? "SpanGarden agent trace report",
     generatedAt: reproducibleTimestamp(spans),
     source: redact ? redactString(options.source ?? "input") : options.source ?? "input",
@@ -404,6 +573,7 @@ export function analyzeSpans(inputSpans: NormalizedSpan[], options: AnalyzeOptio
       spans: spans.length,
       errors: spans.filter((span) => span.status === "error").length,
       retries: loopResult.retries,
+      recoveredRetries: recoveryResult.ledger.reduce((total, entry) => total + entry.failedAttempts.length, 0),
       loops: loopResult.loops.length,
       totalDurationMs: round(traces.reduce((sum, trace) => sum + trace.durationMs, 0)),
       p50SpanMs: quantile(spans.map((span) => span.durationMs), 0.5),
@@ -415,6 +585,7 @@ export function analyzeSpans(inputSpans: NormalizedSpan[], options: AnalyzeOptio
     traces: outputTraces,
     spans: outputSpans,
     usage: outputUsage,
+    recoveryLedger: outputRecoveryLedger,
     loops: outputLoops,
     warnings,
   };

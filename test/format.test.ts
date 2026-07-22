@@ -13,6 +13,42 @@ test("renders terminal, JSON, and Markdown reports", () => {
   assert.match(md, /Model and tool usage/u);
 });
 
+test("renders Recovery Ledger evidence and explicit unknowns in every report format", () => {
+  const report = analyzeSpans([
+    span("root", { startMs: 1, endMs: 100, durationMs: 99 }),
+    span("failed|attempt", { parentId: "root", kind: "tool", tool: "weather\u001b]0;owned", status: "error", startMs: 10, endMs: 20, durationMs: 10 }),
+    span("recovered", { parentId: "root", kind: "tool", tool: "weather\u001b]0;owned", status: "ok", startMs: 25, endMs: 35, durationMs: 10 }),
+    span("model-failed", { parentId: "root", kind: "model", model: "alpha", name: "chat", status: "error", startMs: 40, endMs: 50, durationMs: 10, inputTokens: 1_000, outputTokens: 100 }),
+    span("model-recovered", { parentId: "root", kind: "model", model: "alpha", name: "chat", status: "ok", startMs: 55, endMs: 65, durationMs: 10, inputTokens: 1_000, outputTokens: 200 }),
+  ], { redact: false, pricing: { models: { alpha: { inputPerMillion: 2, outputPerMillion: 8 } } } });
+
+  const terminal = formatReport(report, "terminal");
+  assert.match(terminal, /RECOVERY LEDGER/u);
+  assert.match(terminal, /failed failed\|attempt/u);
+  assert.match(terminal, /recovered by recovered/u);
+  assert.match(terminal, /tokens unknown\s+cost unknown/u);
+  assert.match(terminal, /\$0\.002800/u);
+  assert.ok(!terminal.includes("\u001b"));
+
+  const markdown = formatReport(report, "markdown");
+  assert.match(markdown, /## Recovery Ledger/u);
+  assert.match(markdown, /failed\\\|attempt/u);
+  assert.match(markdown, /unknown/u);
+  assert.match(markdown, /\$0\.002800/u);
+  assert.ok(!markdown.includes("\u001b"));
+
+  const json = JSON.parse(formatReport(report, "json")) as typeof report;
+  assert.deepEqual(json.recoveryLedger, report.recoveryLedger);
+  assert.equal(json.recoveryLedger.find((entry) => entry.operationSignature.startsWith("tool:"))?.estimatedFailedCostUsd, undefined);
+  assert.equal(json.recoveryLedger.find((entry) => entry.operationSignature.startsWith("model:"))?.estimatedFailedCostUsd, 0.0028);
+
+  const html = formatReport(report, "html");
+  assert.match(html, /Recovery Ledger/u);
+  assert.match(html, /missing evidence stays unknown/u);
+  assert.match(html, /estimatedFailedCostUsd/u);
+  assert.ok(!html.includes("failed|attempt"), "dynamic evidence must remain encoded, not interpolated into markup");
+});
+
 test("embeds HTML data without exposing script-closing input", () => {
   const payload = '</script><img src=x onerror="alert(1)">';
   const report = analyzeSpans([span("x", { name: payload })], { title: payload, redact: false });
@@ -25,7 +61,7 @@ test("embeds HTML data without exposing script-closing input", () => {
 
 test("HTML is self-contained while providing an explicit repository link", () => {
   const output = formatReport(analyzeSpans([span("one")]), "html");
-  const description = "Explore AI-agent critical paths, retries, errors, token usage, and estimated cost in a local-first SpanGarden trace report.";
+  const description = "Explore AI-agent critical paths, high-confidence recovered retries, token usage, and opt-in cost evidence in a local-first SpanGarden report.";
   for (const metadata of [
     `<meta name="description" content="${description}">`,
     '<meta property="og:type" content="website">',
