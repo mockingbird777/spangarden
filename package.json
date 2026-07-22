@@ -1,7 +1,7 @@
 {
   "name": "spangarden",
-  "version": "0.1.1",
-  "description": "Local-first OpenTelemetry and AI-agent trace analysis from the terminal.",
+  "version": "0.2.0",
+  "description": "Local-first AI-agent trace analysis with auditable retry recovery evidence.",
   "type": "module",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
@@ -41,6 +41,8 @@
     "llm",
     "tracing",
     "trace-analysis",
+    "retry-analysis",
+    "recovery-ledger",
     "cost-analysis",
     "cli",
     "local-first"

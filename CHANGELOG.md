@@ -4,6 +4,8 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-22
+
 ### Added
 
 - Normalize `durationNs`/`duration_ns` nanosecond duration fields to milliseconds, after the existing millisecond fields.
@@ -47,6 +49,7 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - Terminal, JSON, Markdown, and self-contained interactive HTML reports.
 - Default redaction and a decompressed input-size boundary.
 
-[Unreleased]: https://github.com/mockingbird777/spangarden/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/mockingbird777/spangarden/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/mockingbird777/spangarden/releases/tag/v0.2.0
 [0.1.1]: https://github.com/mockingbird777/spangarden/releases/tag/v0.1.1
 [0.1.0]: https://github.com/mockingbird777/spangarden/releases/tag/v0.1.0

@@ -76,7 +76,7 @@ test("prints concise usage errors and version", async () => {
   assert.equal(invalid.code, 1);
   assert.match(invalid.stderr, /Unknown option/u);
   const version = await run(["--version"]);
-  assert.equal(version.stdout, "0.1.1\n");
+  assert.equal(version.stdout, "0.2.0\n");
 });
 
 test("infers the format from the --output extension when --format is absent", async (t) => {
